@@ -41,3 +41,29 @@ class MaxApiClient:
     async def unsubscribe_webhook(self, url: str) -> None:
         response = await self._request("DELETE", "/subscriptions", params={"url": url})
         response.raise_for_status()
+
+    async def send_message(self, user_id: int, text: str) -> None:
+        payload: dict = {
+            "recipient": {"user_id": user_id},
+            "type": "default",
+            "body": {"text": text},
+        }
+        response = await self._request("POST", "/messages", json=payload)
+        response.raise_for_status()
+
+    async def send_message_with_button(self, user_id: int, text: str, button_text: str, button_url: str) -> None:
+        payload: dict = {
+            "recipient": {"user_id": user_id},
+            "type": "default",
+            "body": {"text": text},
+            "attachments": [
+                {
+                    "type": "inline_keyboard",
+                    "payload": {
+                        "buttons": [[{"type": "link", "text": button_text, "url": button_url}]]
+                    },
+                }
+            ],
+        }
+        response = await self._request("POST", "/messages", json=payload)
+        response.raise_for_status()

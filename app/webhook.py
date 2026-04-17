@@ -7,6 +7,7 @@ from app.callback_ack import build_safe_callback_ack
 from app.config import Settings, get_settings
 from app.db.database import get_db
 from app.db.repo import Repo
+from app.max_api import MaxApiClient
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
@@ -66,21 +67,30 @@ async def handle_max_webhook(
     user_id, text = _extract_sender_and_text(payload)
     callback = update_type == "message_callback" or bool(payload.get("callback"))
 
-    if callback:
-        # Безопасный ответ на callback для maxapi, чтобы не откатывались attachments.
-        return {"type": "callback_ack", "ack": build_safe_callback_ack()}
+    api = MaxApiClient(settings.bot_token)
+    try:
+        if callback:
+            return {"type": "callback_ack", "ack": build_safe_callback_ack()}
 
-    if text == "admin" and user_id in settings.admin_user_ids:
-        return {"route": "admin", "command": "admin", "user_id": user_id}
+        if not user_id:
+            return Response(status_code=200)
 
-    # Deeplink: /start scenario7
-    if text.startswith("/start"):
-        parts = text.split(maxsplit=1)
-        scenario_code = parts[1] if len(parts) > 1 else ""
-        return {"route": "user", "command": "start", "user_id": user_id, "payload": {"scenario_code": scenario_code}}
+        if text in ("admin", "/admin") and user_id in settings.admin_user_ids:
+            await api.send_message(user_id, "Вы вошли в режим администратора.")
+            return Response(status_code=200)
 
-    # Fallback for user conversation steps.
-    repo = Repo(db)
-    if repo.list_required_channels():
-        return {"route": "user", "command": "next", "user_id": user_id}
-    return {"route": "user", "command": "unknown", "user_id": user_id}
+        if text.startswith("/start"):
+            parts = text.split(maxsplit=1)
+            scenario_code = parts[1] if len(parts) > 1 else ""
+            repo = Repo(db)
+            scenario = next((s for s in repo.list_scenarios() if s.code == scenario_code), None)
+            if scenario:
+                await api.send_message(user_id, scenario.description or scenario.title)
+            else:
+                await api.send_message(user_id, "Сценарий не найден. Пожалуйста, используйте корректную ссылку.")
+            return Response(status_code=200)
+
+        await api.send_message(user_id, "Используйте ссылку для начала работы с ботом.")
+        return Response(status_code=200)
+    finally:
+        await api.close()
