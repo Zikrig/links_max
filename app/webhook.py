@@ -17,7 +17,7 @@ from app.keyboards.admin import (
     admin_platforms_keyboard,
     admin_scenarios_keyboard,
 )
-from app.max_api import MaxApiClient
+from app.max_api import MaxApiClient, RateLimitError
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
@@ -379,6 +379,17 @@ async def handle_max_webhook(
         # Молчим на всё остальное
         return Response(status_code=200)
 
+    except RateLimitError as exc:
+        logger.error("Rate limit exhausted: %s", exc)
+        try:
+            await api.client.post(
+                "/messages",
+                params={"user_id": user_id} if user_id > 0 else {"chat_id": user_id},
+                json={"text": "⚠️ MAX API временно недоступен (rate limit). Попробуйте ещё раз через несколько минут."},
+            )
+        except Exception:
+            pass
+        return Response(status_code=200)
     except Exception as exc:
         logger.error("Webhook handler error: %s", exc, exc_info=True)
         return Response(status_code=200)

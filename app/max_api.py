@@ -1,6 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
+
 import httpx
+
+logger = logging.getLogger(__name__)
+
+_RATE_LIMIT_TIMEOUT = 300.0  # 5 минут
+
+
+class RateLimitError(Exception):
+    """MAX API вернул 429 и исчерпан лимит ожидания."""
 
 
 class MaxApiClient:
@@ -17,13 +29,30 @@ class MaxApiClient:
         await self.client.aclose()
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        response = await self.client.request(method, path, **kwargs)
-        if response.status_code != 401 or self._auth_mode == "raw":
+        deadline = time.monotonic() + _RATE_LIMIT_TIMEOUT
+        attempt = 0
+        while True:
+            response = await self.client.request(method, path, **kwargs)
+
+            if response.status_code == 429:
+                retry_after = float(response.headers.get("Retry-After", min(2 ** attempt, 60)))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RateLimitError(
+                        f"MAX API rate limit: 429 на {method} {path} после {_RATE_LIMIT_TIMEOUT:.0f}с ожидания"
+                    )
+                wait = min(retry_after, remaining)
+                logger.warning("429 Too Many Requests — ждём %.1fs (осталось %.0fs)", wait, remaining)
+                await asyncio.sleep(wait)
+                attempt += 1
+                continue
+
+            if response.status_code == 401 and self._auth_mode == "bearer":
+                self.client.headers["Authorization"] = self._bot_token
+                self._auth_mode = "raw"
+                continue
+
             return response
-        # Некоторые инсталляции MAX Bot API принимают токен без Bearer-префикса.
-        self.client.headers["Authorization"] = self._bot_token
-        self._auth_mode = "raw"
-        return await self.client.request(method, path, **kwargs)
 
     async def subscribe_webhook(self, url: str, secret: str | None = None) -> None:
         payload: dict = {
