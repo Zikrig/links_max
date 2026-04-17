@@ -50,6 +50,12 @@ def admin_channels_keyboard(channels: list) -> list:
     return rows
 
 
+def admin_offer_select_platform_keyboard(platforms: list) -> list:
+    rows = [[_btn(p.name, f"admin:offer_select_platform:{p.id}")] for p in platforms]
+    rows.append([_btn("🔙 Назад", "admin:offers")])
+    return rows
+
+
 def admin_export_platforms_keyboard(platforms: list) -> list:
     rows = [[_btn(p.name, f"admin:export_platform:{p.id}")] for p in platforms]
     rows.append([_btn("🔙 Назад", "admin:main")])
