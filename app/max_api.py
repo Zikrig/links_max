@@ -43,19 +43,14 @@ class MaxApiClient:
         response.raise_for_status()
 
     async def send_message(self, user_id: int, text: str) -> None:
-        payload: dict = {
-            "recipient": {"user_id": user_id},
-            "type": "default",
-            "body": {"text": text},
-        }
-        response = await self._request("POST", "/messages", json=payload)
+        params = {"user_id": user_id} if user_id > 0 else {"chat_id": user_id}
+        response = await self._request("POST", "/messages", params=params, json={"text": text})
         response.raise_for_status()
 
     async def send_message_with_button(self, user_id: int, text: str, button_text: str, button_url: str) -> None:
+        params = {"user_id": user_id} if user_id > 0 else {"chat_id": user_id}
         payload: dict = {
-            "recipient": {"user_id": user_id},
-            "type": "default",
-            "body": {"text": text},
+            "text": text,
             "attachments": [
                 {
                     "type": "inline_keyboard",
@@ -65,5 +60,5 @@ class MaxApiClient:
                 }
             ],
         }
-        response = await self._request("POST", "/messages", json=payload)
+        response = await self._request("POST", "/messages", params=params, json=payload)
         response.raise_for_status()
