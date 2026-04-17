@@ -5,6 +5,8 @@ import httpx
 
 class MaxApiClient:
     def __init__(self, bot_token: str):
+        self._bot_token = bot_token
+        self._auth_mode = "bearer"
         self.client = httpx.AsyncClient(
             base_url="https://botapi.max.ru",
             headers={"Authorization": f"Bearer {bot_token}"},
@@ -14,6 +16,15 @@ class MaxApiClient:
     async def close(self) -> None:
         await self.client.aclose()
 
+    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        response = await self.client.request(method, path, **kwargs)
+        if response.status_code != 401 or self._auth_mode == "raw":
+            return response
+        # Некоторые инсталляции MAX Bot API принимают токен без Bearer-префикса.
+        self.client.headers["Authorization"] = self._bot_token
+        self._auth_mode = "raw"
+        return await self.client.request(method, path, **kwargs)
+
     async def subscribe_webhook(self, url: str, secret: str | None = None) -> None:
         payload: dict = {
             "url": url,
@@ -21,12 +32,12 @@ class MaxApiClient:
         }
         if secret:
             payload["secret"] = secret
-        response = await self.client.post("/subscriptions", json=payload)
+        response = await self._request("POST", "/subscriptions", json=payload)
         response.raise_for_status()
         data = response.json()
         if isinstance(data, dict) and data.get("success") is False:
             raise RuntimeError(data.get("message") or "MAX /subscriptions success=false")
 
     async def unsubscribe_webhook(self, url: str) -> None:
-        response = await self.client.delete("/subscriptions", params={"url": url})
+        response = await self._request("DELETE", "/subscriptions", params={"url": url})
         response.raise_for_status()
