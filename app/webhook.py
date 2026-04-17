@@ -17,7 +17,7 @@ def health():
     return {"ok": True}
 
 
-@router.get("/max/webhook/{suffix:path}")
+@router.get("/wh_links_8081")
 def webhook_info():
     return {
         "ok": True,
@@ -42,7 +42,7 @@ def _extract_sender_and_text(payload: dict) -> tuple[int, str]:
     return int(payload.get("user_id", 0)), str(payload.get("text", "")).strip()
 
 
-@router.post("/max/webhook/{suffix:path}")
+@router.post("/wh_links_8081")
 async def handle_max_webhook(
     request: Request,
     x_max_bot_api_secret: str | None = Header(default=None),
