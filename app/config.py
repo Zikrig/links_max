@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     sqlite_path: str = "/data/max_bot.sqlite3"
     tz: str = "Europe/Moscow"
     personal_data_policy_url: str
+    bot_username: str = ""
 
     @field_validator("admin_user_ids", mode="before")
     @classmethod

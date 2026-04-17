@@ -35,6 +35,19 @@ def admin_scenarios_keyboard(scenarios: list) -> list:
     return rows
 
 
+def admin_scenario_select_offer_keyboard(offers: list) -> list:
+    rows = [[_btn(o.name, f"admin:scenario_select_offer:{o.id}")] for o in offers]
+    rows.append([_btn("🔙 Назад", "admin:scenarios")])
+    return rows
+
+
+def admin_scenario_view_keyboard(scenario_id: int) -> list:
+    return [
+        [_btn("🗑 Удалить сценарий", f"admin:scenario_delete:{scenario_id}")],
+        [_btn("🔙 Назад", "admin:scenarios")],
+    ]
+
+
 def admin_bot_links_keyboard() -> list:
     return [
         [_btn("➕ Добавить ссылку", "admin:bot_link_add")],

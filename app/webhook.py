@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app import fsm
 from app.config import Settings, get_settings
 from app.db.database import get_db
+from app.db.models import Scenario
 from app.db.repo import Repo
 from app.keyboards.admin import (
     admin_bot_links_keyboard,
@@ -15,12 +16,18 @@ from app.keyboards.admin import (
     admin_offer_select_platform_keyboard,
     admin_offers_keyboard,
     admin_platforms_keyboard,
+    admin_scenario_select_offer_keyboard,
+    admin_scenario_view_keyboard,
     admin_scenarios_keyboard,
 )
 from app.max_api import MaxApiClient, RateLimitError
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
+
+
+def _get_cached_settings() -> Settings:
+    return get_settings()
 
 
 @router.get("/health")
@@ -163,6 +170,49 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
             await api.send_message(user_id, f"Ошибка добавления канала: {e}")
         return True
 
+    # --- Сценарий: шаг 1 — title ---
+    if state == "scenario_add_title":
+        fsm.set_state(user_id, "scenario_add_description", st.data | {"title": text})
+        await api.send_message(user_id, "Введите описание акции (текст, который увидит подписчик):")
+        return True
+
+    # --- Сценарий: шаг 2 — description ---
+    if state == "scenario_add_description":
+        fsm.set_state(user_id, "scenario_add_image", st.data | {"description": text})
+        await api.send_message(user_id, "Введите ссылку на картинку акции\n(или «-» чтобы пропустить):")
+        return True
+
+    # --- Сценарий: шаг 3 — image_url → создать ---
+    if state == "scenario_add_image":
+        image_url = None if text == "-" else text
+        data = st.data
+        fsm.clear_state(user_id)
+        try:
+            import secrets as _secrets
+            code = f"sc{_secrets.token_hex(4)}"
+            scenario = repo.create_scenario(
+                offer_id=data["offer_id"],
+                code=code,
+                title=data["title"],
+                description=data["description"],
+                image_url=image_url,
+            )
+            settings = _get_cached_settings()
+            if settings.bot_username:
+                deep_link = f"https://max.ru/join/{settings.bot_username}?start={scenario.code}"
+            else:
+                deep_link = f"{settings.webhook_base_url.rstrip('/')}/start?code={scenario.code}"
+            repo.create_or_update_bot_link(scenario.id, deep_link)
+            scenarios = repo.list_scenarios()
+            await api.send_message_with_keyboard(
+                user_id,
+                f"✅ Сценарий «{data['title']}» создан.\n\nКод: {scenario.code}\nСсылка: {deep_link}",
+                admin_scenarios_keyboard(scenarios),
+            )
+        except Exception as e:
+            await api.send_message(user_id, f"Ошибка создания сценария: {e}")
+        return True
+
     return False
 
 
@@ -243,6 +293,50 @@ async def _handle_admin_callback(
         scenarios = repo.list_scenarios()
         text = "Сценарии:" if scenarios else "Сценариев пока нет."
         await api.send_message_with_keyboard(user_id, text, admin_scenarios_keyboard(scenarios))
+        return
+
+    if cb_payload == "admin:scenario_add":
+        offers = repo.list_offers()
+        if not offers:
+            await api.send_message(user_id, "Сначала добавьте хотя бы один оффер.")
+            return
+        await api.send_message_with_keyboard(
+            user_id, "Выберите оффер для нового сценария:", admin_scenario_select_offer_keyboard(offers)
+        )
+        return
+
+    if cb_payload.startswith("admin:scenario_select_offer:"):
+        offer_id = int(cb_payload.split(":")[-1])
+        fsm.set_state(user_id, "scenario_add_title", {"offer_id": offer_id})
+        await api.send_message(user_id, "Введите название сценария (заголовок акции):")
+        return
+
+    if cb_payload.startswith("admin:scenario_view:"):
+        scenario_id = int(cb_payload.split(":")[-1])
+        scenario = repo.db.get(Scenario, scenario_id)
+        if not scenario:
+            await api.send_message(user_id, "Сценарий не найден.")
+            return
+        bot_link = getattr(scenario, "bot_link", None)
+        link_text = f"\nСсылка: {bot_link.deep_link}" if bot_link else ""
+        await api.send_message_with_keyboard(
+            user_id,
+            f"Сценарий: {scenario.title}\nКод: {scenario.code}\nОписание: {scenario.description}{link_text}",
+            admin_scenario_view_keyboard(scenario_id),
+        )
+        return
+
+    if cb_payload.startswith("admin:scenario_delete:"):
+        scenario_id = int(cb_payload.split(":")[-1])
+        try:
+            scenario = repo.db.get(Scenario, scenario_id)
+            if scenario:
+                repo.db.delete(scenario)
+                repo.db.commit()
+            scenarios = repo.list_scenarios()
+            await api.send_message_with_keyboard(user_id, "Сценарий удалён.", admin_scenarios_keyboard(scenarios))
+        except Exception as e:
+            await api.send_message(user_id, f"Ошибка удаления: {e}")
         return
 
     # --- Ссылки на бот ---
