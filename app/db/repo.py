@@ -1,0 +1,188 @@
+from datetime import datetime
+
+from sqlalchemy import Select, select
+from sqlalchemy.orm import Session
+
+from app.db import models
+
+
+class Repo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create_platform(self, name: str) -> models.Platform:
+        entity = models.Platform(name=name)
+        self.db.add(entity)
+        self.db.commit()
+        self.db.refresh(entity)
+        return entity
+
+    def delete_platform(self, platform_id: int) -> None:
+        entity = self.db.get(models.Platform, platform_id)
+        if entity:
+            self.db.delete(entity)
+            self.db.commit()
+
+    def list_platforms(self) -> list[models.Platform]:
+        return list(self.db.scalars(select(models.Platform).order_by(models.Platform.name)))
+
+    def create_offer(
+        self,
+        platform_id: int,
+        name: str,
+        link_prefix: str,
+        subid_static_part: str,
+        link_suffix: str,
+    ) -> models.Offer:
+        offer = models.Offer(
+            platform_id=platform_id,
+            name=name,
+            link_prefix=link_prefix,
+            subid_static_part=subid_static_part,
+            link_suffix=link_suffix,
+        )
+        self.db.add(offer)
+        self.db.commit()
+        self.db.refresh(offer)
+        return offer
+
+    def delete_offer(self, offer_id: int) -> None:
+        entity = self.db.get(models.Offer, offer_id)
+        if entity:
+            self.db.delete(entity)
+            self.db.commit()
+
+    def list_offers(self, platform_id: int | None = None) -> list[models.Offer]:
+        stmt: Select[tuple[models.Offer]] = select(models.Offer).order_by(models.Offer.created_date.desc())
+        if platform_id is not None:
+            stmt = stmt.where(models.Offer.platform_id == platform_id)
+        return list(self.db.scalars(stmt))
+
+    def create_scenario(self, offer_id: int, code: str, title: str, description: str, image_url: str | None) -> models.Scenario:
+        scenario = models.Scenario(
+            offer_id=offer_id,
+            code=code,
+            title=title,
+            description=description,
+            image_url=image_url,
+        )
+        self.db.add(scenario)
+        self.db.commit()
+        self.db.refresh(scenario)
+        return scenario
+
+    def list_scenarios(self) -> list[models.Scenario]:
+        return list(self.db.scalars(select(models.Scenario).order_by(models.Scenario.created_at.desc())))
+
+    def get_scenario_by_code(self, code: str) -> models.Scenario | None:
+        return self.db.scalar(select(models.Scenario).where(models.Scenario.code == code))
+
+    def create_or_update_bot_link(self, scenario_id: int, deep_link: str) -> models.BotLink:
+        entity = self.db.scalar(select(models.BotLink).where(models.BotLink.scenario_id == scenario_id))
+        if entity:
+            entity.deep_link = deep_link
+        else:
+            entity = models.BotLink(scenario_id=scenario_id, deep_link=deep_link)
+            self.db.add(entity)
+        self.db.commit()
+        self.db.refresh(entity)
+        return entity
+
+    def list_bot_links(self) -> list[models.BotLink]:
+        return list(self.db.scalars(select(models.BotLink).order_by(models.BotLink.created_at.desc())))
+
+    def delete_bot_link(self, link_id: int) -> None:
+        entity = self.db.get(models.BotLink, link_id)
+        if entity:
+            self.db.delete(entity)
+            self.db.commit()
+
+    def next_subid(self, offer_id: int) -> str:
+        offer = self.db.get(models.Offer, offer_id)
+        if not offer:
+            raise ValueError("Offer not found")
+        if offer.next_subid > 9999:
+            raise ValueError("SUBID limit reached for this offer")
+        current = offer.next_subid
+        offer.next_subid += 1
+        self.db.commit()
+        return f"{current:04d}"
+
+    def create_lead(
+        self,
+        user_id: int,
+        scenario_id: int,
+        offer_id: int,
+        full_name: str,
+        phone: str,
+        subid_value: str,
+        consent_accepted: bool = True,
+    ) -> models.Lead:
+        lead = models.Lead(
+            user_id=user_id,
+            scenario_id=scenario_id,
+            offer_id=offer_id,
+            full_name=full_name,
+            phone=phone,
+            subid_value=subid_value,
+            consent_accepted=consent_accepted,
+        )
+        self.db.add(lead)
+        self.db.commit()
+        self.db.refresh(lead)
+        return lead
+
+    def list_leads_for_export(self, platform_id: int, offer_id: int) -> list[models.Lead]:
+        stmt = (
+            select(models.Lead)
+            .join(models.Offer, models.Lead.offer_id == models.Offer.id)
+            .where(models.Offer.platform_id == platform_id, models.Offer.id == offer_id)
+            .order_by(models.Lead.issued_at.desc())
+        )
+        return list(self.db.scalars(stmt))
+
+    def add_required_channel(self, title: str, chat_id: int, invite_link: str | None) -> models.RequiredChannel:
+        channel = models.RequiredChannel(title=title, chat_id=chat_id, invite_link=invite_link)
+        self.db.add(channel)
+        self.db.commit()
+        self.db.refresh(channel)
+        return channel
+
+    def list_required_channels(self) -> list[models.RequiredChannel]:
+        return list(self.db.scalars(select(models.RequiredChannel).order_by(models.RequiredChannel.id.desc())))
+
+    def delete_required_channel(self, channel_id: int) -> None:
+        entity = self.db.get(models.RequiredChannel, channel_id)
+        if entity:
+            self.db.delete(entity)
+            self.db.commit()
+
+    def create_broadcast(
+        self,
+        title: str,
+        text: str,
+        button_url: str,
+        button_text: str = "Перейти к акции",
+        image_url: str | None = None,
+        send_at: datetime | None = None,
+    ) -> models.Broadcast:
+        item = models.Broadcast(
+            title=title,
+            text=text,
+            button_text=button_text,
+            button_url=button_url,
+            image_url=image_url,
+            send_at=send_at,
+            status="scheduled",
+        )
+        self.db.add(item)
+        self.db.commit()
+        self.db.refresh(item)
+        return item
+
+    def mark_broadcast_sent(self, broadcast_id: int) -> None:
+        item = self.db.get(models.Broadcast, broadcast_id)
+        if item:
+            item.status = "sent"
+            item.sent_at = datetime.utcnow()
+            self.db.commit()
