@@ -1,9 +1,9 @@
 from functools import lru_cache
-from typing import Set
+from typing import Annotated, Set
 from urllib.parse import urlparse
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     webhook_base_url: str
     webhook_path: str = "/max/webhook"
     webhook_secret: str
-    admin_user_ids: Set[int] = set()
+    admin_user_ids: Annotated[Set[int], NoDecode] = set()
     sqlite_path: str = "/data/max_bot.sqlite3"
     tz: str = "Europe/Moscow"
     personal_data_policy_url: str
