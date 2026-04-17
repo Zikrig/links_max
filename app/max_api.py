@@ -47,6 +47,17 @@ class MaxApiClient:
         response = await self._request("POST", "/messages", params=params, json={"text": text})
         response.raise_for_status()
 
+    async def send_message_with_keyboard(self, user_id: int, text: str, buttons: list) -> dict | None:
+        """Отправить сообщение с inline-клавиатурой. buttons — list of rows (list of dicts)."""
+        params = {"user_id": user_id} if user_id > 0 else {"chat_id": user_id}
+        payload: dict = {
+            "text": text,
+            "attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}],
+        }
+        response = await self._request("POST", "/messages", params=params, json=payload)
+        response.raise_for_status()
+        return response.json().get("message")
+
     async def send_message_with_button(self, user_id: int, text: str, button_text: str, button_url: str) -> None:
         params = {"user_id": user_id} if user_id > 0 else {"chat_id": user_id}
         payload: dict = {
@@ -62,3 +73,13 @@ class MaxApiClient:
         }
         response = await self._request("POST", "/messages", params=params, json=payload)
         response.raise_for_status()
+
+    async def answer_callback(self, callback_id: str, notification: str = " ") -> None:
+        """Подтвердить callback без изменения сообщения (безопасный ack из MAX_README)."""
+        response = await self._request(
+            "POST", "/answers",
+            params={"callback_id": callback_id},
+            json={"message": None, "notification": notification},
+        )
+        if response.status_code not in (200, 204):
+            pass  # не падаем — ack не критичен
