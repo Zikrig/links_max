@@ -81,25 +81,19 @@ def _extract_event(payload: dict) -> Event:
     if update_type == "message_callback":
         cb = payload.get("callback", {}) or {}
         user = cb.get("user", {}) or {}
-        cb_msg = cb.get("message", {}) or {}
-        cb_body = cb_msg.get("body", {}) or {}
-        mid = (
-            cb_body.get("mid")
-            or cb_body.get("message_id")
-            or cb_msg.get("mid")
-            or cb_msg.get("message_id")
-            or cb.get("message_id")
-            or ""
-        )
+        # В MAX API "message" находится на верхнем уровне payload, НЕ внутри "callback"
+        top_msg = payload.get("message", {}) or {}
+        top_body = top_msg.get("body", {}) or {}
+        mid = str(top_body.get("mid", "") or "")
         if not mid:
-            logger.warning("CALLBACK_STRUCT: mid not found. keys_cb=%s keys_msg=%s keys_body=%s",
-                           list(cb.keys()), list(cb_msg.keys()), list(cb_body.keys()))
+            logger.warning("CALLBACK_STRUCT: mid not found. payload keys=%s cb keys=%s msg keys=%s",
+                           list(payload.keys()), list(cb.keys()), list(top_msg.keys()))
         return Event(
             user_id=int(user.get("user_id") or 0),
             text=str(cb.get("payload", "")).strip(),
             update_type=update_type,
             callback_id=str(cb.get("callback_id", "")),
-            message_id=str(mid),
+            message_id=mid,
             max_name=str(user.get("name", "") or ""),
             max_username=str(user.get("username", "") or ""),
         )
