@@ -194,23 +194,35 @@ class MaxApiClient:
         response = await self._request("POST", "/messages", params=params, json=payload)
         response.raise_for_status()
 
-    async def edit_message(self, message_id: str, text: str, buttons: list | None = None) -> None:
-        """Редактировать существующее сообщение. buttons=None — убрать клавиатуру, buttons=[] — тоже убрать."""
+    async def edit_message(self, message_id: str, text: str, buttons: list | None = None) -> bool:
+        """
+        Редактировать существующее сообщение.
+        buttons=None / [] — убрать клавиатуру.
+        Возвращает True если успешно, False если нет.
+        """
         body: dict = {"text": text}
         if buttons:
             body["attachments"] = [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]
         else:
             body["attachments"] = []
-        response = await self._request("PUT", "/messages", params={"message_id": message_id}, json=body)
-        if response.status_code not in (200, 204):
-            logger.warning("edit_message failed %s: %s", response.status_code, response.text[:200])
+        try:
+            response = await self._request("PUT", "/messages", params={"message_id": message_id}, json=body)
+            if response.status_code in (200, 204):
+                return True
+            logger.warning("edit_message failed %s body=%s", response.status_code, response.text[:300])
+            return False
+        except Exception as exc:
+            logger.warning("edit_message exception: %s", exc)
+            return False
 
     async def answer_callback(self, callback_id: str, notification: str = " ") -> None:
-        """Подтвердить callback без изменения сообщения (безопасный ack из MAX_README)."""
-        response = await self._request(
-            "POST", "/answers",
-            params={"callback_id": callback_id},
-            json={"message": None, "notification": notification},
-        )
-        if response.status_code not in (200, 204):
-            pass  # не падаем — ack не критичен
+        """Подтвердить callback без изменения сообщения."""
+        try:
+            await self._request(
+                "POST", "/answers",
+                params={"callback_id": callback_id},
+                # Не передаём "message": null — просто уведомление
+                json={"notification": notification},
+            )
+        except Exception:
+            pass  # ack не критичен

@@ -91,8 +91,9 @@ def _extract_event(payload: dict) -> Event:
             or cb.get("message_id")
             or ""
         )
-        logger.warning("CALLBACK_STRUCT mid=%r keys_cb=%s keys_msg=%s keys_body=%s",
-                       mid, list(cb.keys()), list(cb_msg.keys()), list(cb_body.keys()))
+        if not mid:
+            logger.warning("CALLBACK_STRUCT: mid not found. keys_cb=%s keys_msg=%s keys_body=%s",
+                           list(cb.keys()), list(cb_msg.keys()), list(cb_body.keys()))
         return Event(
             user_id=int(user.get("user_id") or 0),
             text=str(cb.get("payload", "")).strip(),
@@ -439,20 +440,37 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
 async def _handle_admin_callback(
     api: MaxApiClient, repo: Repo, user_id: int, cb_payload: str, callback_id: str, message_id: str
 ) -> None:
-    # Сначала подтверждаем callback без изменения сообщения — editим ниже сами
-    await api.answer_callback(callback_id)
+    """
+    Паттерн smena_new:
+    1. Редактируем сообщение (PUT /messages)
+    2. Потом подтверждаем callback (POST /answers)
+    При неудаче edit — fallback: новое сообщение.
+    Callback всегда подтверждается через try/finally.
+    """
+    _acked = False
+
+    async def _ack() -> None:
+        nonlocal _acked
+        if not _acked:
+            _acked = True
+            await api.answer_callback(callback_id)
 
     async def _edit(text: str, buttons: list | None = None) -> None:
+        edited = False
         if message_id:
-            await api.edit_message(message_id, text, buttons)
-        else:
+            edited = await api.edit_message(message_id, text, buttons)
+            if not edited:
+                logger.warning("edit_message failed for mid=%r, falling back to new message", message_id)
+        if not edited:
             await api.send_message_with_keyboard(user_id, text, buttons or [])
+        await _ack()
 
     async def _edit_then_ask(text_edit: str, question: str) -> None:
         """Убрать кнопки в текущем сообщении, задать вопрос новым. Сохраняет message_id в FSM."""
         if message_id:
             await api.edit_message(message_id, text_edit, buttons=None)
             fsm.update_data(user_id, _msg_id=message_id)
+        await _ack()
         await api.send_message(user_id, question)
 
     if cb_payload == "admin:main":
@@ -900,6 +918,21 @@ async def _handle_admin_callback(
         return
 
     logger.warning("Неизвестный admin callback: %r", cb_payload)
+    await _ack()
+
+
+async def _dispatch_admin_callback(
+    api: MaxApiClient, repo: Repo, user_id: int, cb_payload: str, callback_id: str, message_id: str
+) -> None:
+    """Обёртка с гарантированным ack даже при необработанных исключениях."""
+    try:
+        await _handle_admin_callback(api, repo, user_id, cb_payload, callback_id, message_id)
+    except Exception as exc:
+        logger.error("Admin callback error payload=%r: %s", cb_payload, exc, exc_info=True)
+        try:
+            await api.answer_callback(callback_id)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -955,7 +988,7 @@ async def handle_max_webhook(
             if ev.text.startswith("user:"):
                 await _handle_user_callback(api, repo, ev.user_id, ev.text, ev.callback_id, ev.message_id, ev.max_name, ev.max_username, settings)
             elif is_admin and ev.text.startswith("admin:"):
-                await _handle_admin_callback(api, repo, ev.user_id, ev.text, ev.callback_id, ev.message_id)
+                await _dispatch_admin_callback(api, repo, ev.user_id, ev.text, ev.callback_id, ev.message_id)
             else:
                 if ev.callback_id:
                     await api.answer_callback(ev.callback_id)
