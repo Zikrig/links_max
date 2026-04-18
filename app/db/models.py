@@ -45,10 +45,11 @@ class Scenario(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     offer: Mapped["Offer"] = relationship(back_populates="scenarios")
-    bot_link: Mapped["BotLink"] = relationship(back_populates="scenario", uselist=False)
+    bot_link: Mapped["BotLink"] = relationship(back_populates="scenario", uselist=False, cascade="all, delete-orphan")
     channels: Mapped[list["ScenarioChannel"]] = relationship(
         back_populates="scenario", cascade="all, delete-orphan"
     )
+    leads: Mapped[list["Lead"]] = relationship(back_populates="scenario", cascade="all, delete-orphan")
 
 
 class ScenarioChannel(Base):
@@ -100,6 +101,7 @@ class Lead(Base):
     scenario_id: Mapped[int] = mapped_column(ForeignKey("scenarios.id"), index=True)
 
     offer: Mapped["Offer"] = relationship(back_populates="leads")
+    scenario: Mapped["Scenario"] = relationship(back_populates="leads")
 
 
 class Broadcast(Base):
