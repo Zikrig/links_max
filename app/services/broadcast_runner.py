@@ -89,6 +89,9 @@ async def run_broadcast(broadcast_id: int) -> None:
             b0 = repo.get_broadcast(broadcast_id)
             if not b0:
                 return
+            if b0.status == "cancelled":
+                logger.info("run_broadcast: skip id=%s (cancelled)", broadcast_id)
+                return
             if b0.send_at and b0.send_at > datetime.utcnow() + timedelta(seconds=3):
                 logger.info("run_broadcast: skip id=%s (send_at in future)", broadcast_id)
                 return

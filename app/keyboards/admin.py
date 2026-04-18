@@ -206,10 +206,54 @@ def build_keyboard_attachment(buttons: list) -> dict:
     }
 
 
+BROADCAST_MANAGE_PAGE_SIZE = 5
+
+
+def admin_broadcast_manage_keyboard(page: int, total_count: int, items: list) -> list:
+    """Список рассылок с пагинацией."""
+    rows: list = []
+    for b in items:
+        title = (getattr(b, "title", None) or "без названия").replace("\n", " ").strip()
+        if len(title) > 30:
+            title = title[:27] + "…"
+        rows.append([_btn(f"#{b.id} «{title}»", f"admin:broadcast_view:{b.id}")])
+    if total_count == 0:
+        rows.append([_btn("🔙 Назад", "admin:broadcast")])
+        return rows
+    total_pages = max(1, (total_count + BROADCAST_MANAGE_PAGE_SIZE - 1) // BROADCAST_MANAGE_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    nav = []
+    if page > 0:
+        nav.append(_btn("◀", f"admin:broadcast_manage:{page - 1}"))
+    if (page + 1) * BROADCAST_MANAGE_PAGE_SIZE < total_count:
+        nav.append(_btn("▶", f"admin:broadcast_manage:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([_btn("🔙 Назад", "admin:broadcast")])
+    return rows
+
+
+def admin_broadcast_manage_cancel_keyboard() -> list:
+    """Отмена ввода времени переноса — назад к списку."""
+    return [[_btn("🔙 Отмена", "admin:broadcast_manage:0")]]
+
+
+def admin_broadcast_detail_keyboard(broadcast_id: int, status: str) -> list:
+    rows: list = []
+    if status == "scheduled":
+        rows.append([_btn("▶ Отправить сейчас", f"admin:broadcast_now:{broadcast_id}")])
+        rows.append([_btn("📅 Другое время", f"admin:broadcast_reschedule:{broadcast_id}")])
+        rows.append([_btn("🚫 Отменить", f"admin:broadcast_cancel_pending:{broadcast_id}")])
+    elif status in ("sent", "failed"):
+        rows.append([_btn("📋 Повторить (копия)", f"admin:broadcast_repeat:{broadcast_id}")])
+    rows.append([_btn("🔙 К списку", "admin:broadcast_manage:0")])
+    return rows
+
+
 def admin_broadcast_entry_keyboard() -> list:
     return [
         [_btn("✉️ Создать рассылку", "admin:broadcast_new")],
-        [_btn("📋 История рассылок", "admin:broadcast_history")],
+        [_btn("📬 Управление рассылками", "admin:broadcast_manage:0")],
         [_btn("🔙 Назад", "admin:main")],
     ]
 

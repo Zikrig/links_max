@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from app.db import models
@@ -203,6 +203,49 @@ class Repo:
             .limit(limit)
         )
         return list(self.db.scalars(stmt))
+
+    def count_broadcasts(self) -> int:
+        n = self.db.scalar(select(func.count()).select_from(models.Broadcast))
+        return int(n or 0)
+
+    def list_broadcasts_paged(self, offset: int, limit: int) -> list[models.Broadcast]:
+        stmt = (
+            select(models.Broadcast)
+            .order_by(models.Broadcast.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.db.scalars(stmt))
+
+    def duplicate_broadcast(self, source_id: int) -> models.Broadcast | None:
+        src = self.get_broadcast(source_id)
+        if not src:
+            return None
+        return self.create_broadcast(
+            title=src.title,
+            text=src.text,
+            button_url=src.button_url,
+            button_text=src.button_text or "Перейти к акции",
+            image_url=src.image_url,
+            send_at=None,
+            status="scheduled",
+        )
+
+    def set_broadcast_send_at(self, broadcast_id: int, send_at: datetime | None) -> bool:
+        b = self.db.get(models.Broadcast, broadcast_id)
+        if not b or b.status != "scheduled":
+            return False
+        b.send_at = send_at
+        self.db.commit()
+        return True
+
+    def cancel_pending_broadcast(self, broadcast_id: int) -> bool:
+        b = self.db.get(models.Broadcast, broadcast_id)
+        if not b or b.status != "scheduled":
+            return False
+        b.status = "cancelled"
+        self.db.commit()
+        return True
 
     def list_scheduled_broadcasts_with_send_at(self) -> list[models.Broadcast]:
         """Все отложенные по send_at (для восстановления планировщика после рестарта)."""

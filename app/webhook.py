@@ -2,7 +2,7 @@ import logging
 import secrets as _secrets
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone as tz_utc
 from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 
@@ -15,9 +15,13 @@ from app.db.database import get_db
 from app.db.models import Offer, Scenario
 from app.db.repo import Repo
 from app.keyboards.admin import (
+    BROADCAST_MANAGE_PAGE_SIZE,
     admin_bot_links_keyboard,
     admin_broadcast_default_button_keyboard,
+    admin_broadcast_detail_keyboard,
     admin_broadcast_entry_keyboard,
+    admin_broadcast_manage_cancel_keyboard,
+    admin_broadcast_manage_keyboard,
     admin_broadcast_preview_keyboard,
     admin_broadcast_schedule_cancel_keyboard,
     admin_broadcast_skip_image_keyboard,
@@ -44,7 +48,7 @@ from app.keyboards.user import (
     user_subscribe_keyboard,
 )
 from app.max_api import MaxApiClient, RateLimitError
-from app.services.broadcast_runner import launch_broadcast_now, schedule_broadcast_job
+from app.services.broadcast_runner import get_scheduler, launch_broadcast_now, schedule_broadcast_job
 from app.services.export_service import ExportService
 from app.services.link_builder import build_offer_link, offer_produces_valid_links
 from app.services.user_flow import UserFlowService
@@ -126,40 +130,39 @@ def _format_broadcast_preview(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_broadcast_history_line(b) -> str:
-    """Одна строка для списка рассылок (b — models.Broadcast)."""
+def _remove_broadcast_scheduler_job(broadcast_id: int) -> None:
+    try:
+        get_scheduler().remove_job(f"broadcast_{broadcast_id}")
+    except Exception:
+        pass
+
+
+def _format_broadcast_detail(b) -> str:
+    """Карточка рассылки для экрана управления."""
     status_map = {
-        "scheduled": "запланирована",
-        "sending": "отправка",
+        "scheduled": "ожидает отправки",
+        "sending": "отправляется",
         "sent": "отправлена",
         "failed": "ошибка",
+        "cancelled": "отменена",
     }
-    label = status_map.get(b.status, b.status)
     msk = ZoneInfo("Europe/Moscow")
-    from datetime import timezone as tz_utc
-
-    extra = ""
+    head = [f"📬 Рассылка #{b.id}", f"Статус: {status_map.get(b.status, b.status)}"]
     if b.status == "scheduled" and b.send_at:
         dt = b.send_at.replace(tzinfo=tz_utc.utc)
-        when = dt.astimezone(msk).strftime("%d.%m.%Y %H:%M МСК")
-        extra = f", {when}"
+        head.append(f"Отправка: {dt.astimezone(msk).strftime('%d.%m.%Y %H:%M')} МСК")
     elif b.status == "sent" and b.sent_at:
         dt = b.sent_at.replace(tzinfo=tz_utc.utc)
-        when = dt.astimezone(msk).strftime("%d.%m.%Y %H:%M МСК")
-        extra = f", {when}"
-    title = (b.title or "").replace("\n", " ").strip() or "без названия"
-    if len(title) > 45:
-        title = title[:42] + "…"
-    return f"#{b.id} «{title}» — {label}{extra}"
-
-
-def _build_broadcast_history_text(repo: Repo) -> str:
-    items = repo.list_broadcasts_recent(20)
-    if not items:
-        return "📋 История рассылок пуста."
-    lines = ["📋 Последние рассылки (до 20):", ""]
-    lines.extend(_format_broadcast_history_line(b) for b in items)
-    return "\n".join(lines)
+        head.append(f"Отправлена: {dt.astimezone(msk).strftime('%d.%m.%Y %H:%M')} МСК")
+    head.append("")
+    data = {
+        "title": b.title,
+        "text": b.text or "",
+        "button_url": b.button_url,
+        "button_text": b.button_text,
+        "image_url": b.image_url,
+    }
+    return "\n".join(head) + "\n" + _format_broadcast_preview(data)
 
 
 def _parse_broadcast_schedule(text: str) -> datetime | None:
@@ -797,6 +800,42 @@ async def _handle_admin_fsm_text(
             await api.send_message(user_id, f"Ошибка: {e}")
         return True
 
+    if state == "broadcast_reschedule_at":
+        bid = int(st.data.get("broadcast_id", 0))
+        when = _parse_broadcast_schedule(text)
+        if not when:
+            await api.send_message(
+                user_id,
+                "Не удалось разобрать дату. Пример (московское время): 18.04.2026 15:30",
+            )
+            return True
+        if when <= datetime.utcnow():
+            await api.send_message(user_id, "Укажите дату и время в будущем.")
+            return True
+        b = repo.get_broadcast(bid)
+        if not b or b.status != "scheduled":
+            fsm.clear_state(user_id)
+            await api.send_message(user_id, "Рассылка уже недоступна для переноса.")
+            return True
+        _remove_broadcast_scheduler_job(bid)
+        if not repo.set_broadcast_send_at(bid, when):
+            fsm.clear_state(user_id)
+            await api.send_message(user_id, "Не удалось сохранить время.")
+            return True
+        schedule_broadcast_job(bid, when)
+        fsm.clear_state(user_id)
+        msk = ZoneInfo("Europe/Moscow")
+        local = when.replace(tzinfo=ZoneInfo("UTC")).astimezone(msk).strftime("%d.%m.%Y %H:%M")
+        total = repo.count_broadcasts()
+        ps = BROADCAST_MANAGE_PAGE_SIZE
+        items = repo.list_broadcasts_paged(0, ps)
+        await api.send_message_with_keyboard(
+            user_id,
+            f"✅ Рассылка #{bid} перенесена на {local} (МСК).",
+            admin_broadcast_manage_keyboard(0, total, items),
+        )
+        return True
+
     if state == "broadcast_preview":
         await api.send_message(
             user_id,
@@ -1365,10 +1404,119 @@ async def _handle_admin_callback(
         )
         return
 
-    if cb_payload == "admin:broadcast_history":
+    if cb_payload.startswith("admin:broadcast_manage:"):
+        fsm.clear_state(user_id)
+        try:
+            page = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            page = 0
+        total = repo.count_broadcasts()
+        ps = BROADCAST_MANAGE_PAGE_SIZE
+        total_pages = max(1, (total + ps - 1) // ps) if total else 1
+        page = max(0, min(page, total_pages - 1))
+        items = repo.list_broadcasts_paged(page * ps, ps)
+        if total:
+            body = (
+                "📬 Управление рассылками\n\n"
+                f"Страница {page + 1} из {total_pages} (всего {total}).\n"
+                "Выберите рассылку:"
+            )
+        else:
+            body = "📬 Управление рассылками\n\nПока нет ни одной рассылки."
+        await _edit(body, admin_broadcast_manage_keyboard(page, total, items))
+        return
+
+    if cb_payload.startswith("admin:broadcast_view:"):
+        fsm.clear_state(user_id)
+        try:
+            bid = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            return
+        b = repo.get_broadcast(bid)
+        if not b:
+            await _edit("Рассылка не найдена.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), []))
+            return
+        await _edit(_format_broadcast_detail(b), admin_broadcast_detail_keyboard(bid, b.status))
+        return
+
+    if cb_payload.startswith("admin:broadcast_now:"):
+        try:
+            bid = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            await _ack()
+            return
+        b = repo.get_broadcast(bid)
+        if not b or b.status != "scheduled":
+            await _edit(
+                "Нельзя отправить: рассылка не в статусе ожидания.",
+                admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)),
+            )
+            return
+        _remove_broadcast_scheduler_job(bid)
+        repo.set_broadcast_send_at(bid, None)
+        launch_broadcast_now(bid)
+        total = repo.count_broadcasts()
+        ps = BROADCAST_MANAGE_PAGE_SIZE
         await _edit(
-            _build_broadcast_history_text(repo),
-            admin_broadcast_entry_keyboard(),
+            f"✅ Рассылка #{bid} поставлена в очередь на отправку.",
+            admin_broadcast_manage_keyboard(0, total, repo.list_broadcasts_paged(0, ps)),
+        )
+        return
+
+    if cb_payload.startswith("admin:broadcast_reschedule:"):
+        try:
+            bid = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            await _ack()
+            return
+        b = repo.get_broadcast(bid)
+        if not b or b.status != "scheduled":
+            await _edit("Перенос недоступен.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)))
+            return
+        fsm.set_state(user_id, "broadcast_reschedule_at", {"broadcast_id": bid})
+        await _edit(
+            "Укажите дату и время отправки (московское время), например:\n18.04.2026 15:30",
+            admin_broadcast_manage_cancel_keyboard(),
+        )
+        return
+
+    if cb_payload.startswith("admin:broadcast_cancel_pending:"):
+        try:
+            bid = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            await _ack()
+            return
+        b = repo.get_broadcast(bid)
+        if not b:
+            await _edit("Не найдено.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), []))
+            return
+        if repo.cancel_pending_broadcast(bid):
+            _remove_broadcast_scheduler_job(bid)
+            await _edit(
+                f"Рассылка #{bid} отменена.",
+                admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)),
+            )
+        else:
+            await _edit(
+                "Отмена недоступна (уже отправлена или не в ожидании).",
+                admin_broadcast_detail_keyboard(bid, b.status),
+            )
+        return
+
+    if cb_payload.startswith("admin:broadcast_repeat:"):
+        try:
+            oid = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            await _ack()
+            return
+        nb = repo.duplicate_broadcast(oid)
+        if not nb:
+            await _edit("Не удалось создать копию.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), []))
+            return
+        fsm.clear_state(user_id)
+        await _edit(
+            _format_broadcast_detail(nb) + "\n\nСоздана копия — можно отправить или запланировать.",
+            admin_broadcast_detail_keyboard(nb.id, nb.status),
         )
         return
 
