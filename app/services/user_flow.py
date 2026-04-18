@@ -31,7 +31,16 @@ class UserFlowService:
         if not validate_phone(phone):
             raise ValueError("Укажите корректный номер телефона")
 
-    def issue_personal_link(self, user_id: int, scenario_code: str, full_name: str, phone: str) -> str:
+    def issue_personal_link(
+        self,
+        user_id: int,
+        scenario_code: str,
+        full_name: str,
+        phone: str,
+        *,
+        max_name: str | None = None,
+        max_username: str | None = None,
+    ) -> str:
         self.validate_profile(full_name=full_name, phone=phone)
         scenario = self.start_scenario(scenario_code=scenario_code)
         subid = self.repo.next_subid(offer_id=scenario.offer_id)
@@ -44,6 +53,8 @@ class UserFlowService:
             phone=phone,
             subid_value=subid,
             consent_accepted=True,
+            max_name=max_name,
+            max_username=max_username,
         )
         return final_link
 

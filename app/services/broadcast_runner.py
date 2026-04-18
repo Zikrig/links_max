@@ -111,9 +111,11 @@ async def run_broadcast(broadcast_id: int) -> None:
             text = b.text
             button_text = b.button_text
             button_url = b.button_url
-            image_url = b.image_url
+            image_stored = b.image_url
         finally:
             db.close()
+
+        image_token = await api.resolve_broadcast_image_token(image_stored)
 
         try:
             for uid in recipients:
@@ -123,7 +125,7 @@ async def run_broadcast(broadcast_id: int) -> None:
                         text,
                         button_text,
                         button_url,
-                        image_url=image_url,
+                        image_url=image_token,
                     )
                 except Exception as exc:
                     logger.warning("broadcast to user_id=%s: %s", uid, exc)

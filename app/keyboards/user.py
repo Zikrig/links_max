@@ -7,13 +7,9 @@ def _btn_link(text: str, url: str) -> dict:
 
 
 def user_material_keyboard(scenario_code: str, ref_url: str | None) -> list:
-    """
-    Клавиатура под материалом акции.
-    ref_url задан → показываем кнопку-ссылку сразу (проверка подписки выключена).
-    ref_url=None → показываем кнопку «Далее» (проверка подписки выключена, но ссылка нужна позже).
-    """
+    """Под описанием акции — только «Далее»; реф. ссылка выдаётся после ФИО, телефона и согласия (ТЗ)."""
     if ref_url:
-        return [[_btn_link("🏦 Получить карту", ref_url)]]
+        return [[_btn_link("Оформить карту", ref_url)]]
     return [[_btn_callback("Далее ➡️", f"user:next:{scenario_code}")]]
 
 
@@ -42,4 +38,4 @@ def user_consent_keyboard(scenario_code: str, policy_url: str) -> list:
 
 
 def user_card_keyboard(ref_url: str) -> list:
-    return [[_btn_link("🏦 Получить карту", ref_url)]]
+    return [[_btn_link("Оформить карту", ref_url)]]

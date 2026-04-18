@@ -38,7 +38,7 @@ from app.keyboards.admin import (
 )
 from app.keyboards.user import (
     user_card_keyboard,
-    user_channels_keyboard,
+    user_consent_keyboard,
     user_material_keyboard,
     user_subscribe_keyboard,
 )
@@ -46,6 +46,8 @@ from app.max_api import MaxApiClient, RateLimitError
 from app.services.broadcast_runner import launch_broadcast_now, schedule_broadcast_job
 from app.services.export_service import ExportService
 from app.services.link_builder import build_offer_link, offer_produces_valid_links
+from app.services.user_flow import UserFlowService
+from app.validators import validate_full_name, validate_phone
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
@@ -71,12 +73,64 @@ def _get_cached_settings() -> Settings:
     return get_settings()
 
 
+def _normalize_broadcast_https_url(raw: str) -> str:
+    """Для рассылки: если схемы нет — подставить https://."""
+    t = raw.strip()
+    if not t:
+        return t
+    tl = t.lower()
+    if tl.startswith("http://") or tl.startswith("https://"):
+        return t
+    return f"https://{t}"
+
+
 def _format_broadcast_preview(data: dict) -> str:
     lines = ["📣 Превью рассылки", "", f"Заголовок: {data.get('title', '')}"]
     img = data.get("image_url")
-    lines.append(f"Картинка: {img}" if img else "Картинка: —")
+    if not img:
+        lines.append("Картинка: —")
+    elif str(img).startswith("http://") or str(img).startswith("https://"):
+        lines.append("Картинка: да (будет загружена по ссылке)")
+    else:
+        lines.append("Картинка: да (вложение)")
     lines.extend(["", data.get("text", ""), ""])
     lines.append(f"Кнопка: «{data.get('button_text', '')}» → {data.get('button_url', '')}")
+    return "\n".join(lines)
+
+
+def _format_broadcast_history_line(b) -> str:
+    """Одна строка для списка рассылок (b — models.Broadcast)."""
+    status_map = {
+        "scheduled": "запланирована",
+        "sending": "отправка",
+        "sent": "отправлена",
+        "failed": "ошибка",
+    }
+    label = status_map.get(b.status, b.status)
+    msk = ZoneInfo("Europe/Moscow")
+    from datetime import timezone as tz_utc
+
+    extra = ""
+    if b.status == "scheduled" and b.send_at:
+        dt = b.send_at.replace(tzinfo=tz_utc.utc)
+        when = dt.astimezone(msk).strftime("%d.%m.%Y %H:%M МСК")
+        extra = f", {when}"
+    elif b.status == "sent" and b.sent_at:
+        dt = b.sent_at.replace(tzinfo=tz_utc.utc)
+        when = dt.astimezone(msk).strftime("%d.%m.%Y %H:%M МСК")
+        extra = f", {when}"
+    title = (b.title or "").replace("\n", " ").strip() or "без названия"
+    if len(title) > 45:
+        title = title[:42] + "…"
+    return f"#{b.id} «{title}» — {label}{extra}"
+
+
+def _build_broadcast_history_text(repo: Repo) -> str:
+    items = repo.list_broadcasts_recent(20)
+    if not items:
+        return "📋 История рассылок пуста."
+    lines = ["📋 Последние рассылки (до 20):", ""]
+    lines.extend(_format_broadcast_history_line(b) for b in items)
     return "\n".join(lines)
 
 
@@ -178,50 +232,83 @@ def _extract_event(payload: dict) -> Event:
 
 
 # ---------------------------------------------------------------------------
-# FSM: подписчик (текстовый ввод больше не нужен в user flow, оставляем заглушку)
+# FSM: подписчик — ФИО и телефон после «Далее» и проверки подписки (ТЗ)
 # ---------------------------------------------------------------------------
 
-async def _handle_user_fsm_text(
-    api: MaxApiClient, repo: Repo, user_id: int, text: str, settings: Settings
-) -> bool:
-    return False
+async def _begin_user_fio_flow(api: MaxApiClient, user_id: int, scenario_code: str) -> None:
+    fsm.set_state(user_id, "user_fio", {"scenario_code": scenario_code})
+    await api.send_message(
+        user_id,
+        "Введите ФИО, на кого будет оформлена карта (фамилия, имя и отчество).",
+    )
 
 
-async def _issue_link(
-    api: MaxApiClient, repo: Repo, user_id: int, scenario_code: str,
-    max_name: str = "", max_username: str = "",
+async def _user_proceed_to_fio_after_checks(
+    api: MaxApiClient, repo: Repo, user_id: int, scenario_code: str
 ) -> None:
     scenario = repo.get_scenario_by_code(scenario_code)
     if not scenario:
-        await api.send_message(user_id, "Ошибка: сценарий не найден.")
+        await api.send_message(user_id, "Сценарий не найден.")
         return
     if not offer_produces_valid_links(scenario.offer):
         await api.send_message(
             user_id,
-            "Ошибка: у оффера не задана основная ссылка. Укажите её в админке (хотя бы домен, без https тоже можно).",
+            "Ошибка: у оффера не задана основная ссылка. Обратитесь к администратору.",
         )
         return
+    await _begin_user_fio_flow(api, user_id, scenario_code)
 
-    try:
-        subid = repo.next_subid(offer_id=scenario.offer_id)
-    except ValueError as e:
-        await api.send_message(user_id, f"Ошибка: {e}")
-        return
 
-    final_link = build_offer_link(offer=scenario.offer, subid_value=subid)
-    repo.create_lead(
-        user_id=user_id,
-        scenario_id=scenario.id,
-        offer_id=scenario.offer_id,
-        subid_value=subid,
-        max_name=max_name or None,
-        max_username=max_username or None,
-    )
-    await api.send_message_with_keyboard(
-        user_id,
-        "Ваша персональная ссылка готова. Перейдите по ней для оформления:",
-        user_card_keyboard(final_link),
-    )
+async def _handle_user_fsm_text(
+    api: MaxApiClient,
+    repo: Repo,
+    user_id: int,
+    text: str,
+    settings: Settings,
+    max_name: str = "",
+    max_username: str = "",
+) -> bool:
+    st = fsm.get_state(user_id)
+    if not st:
+        return False
+
+    if st.state == "user_fio":
+        if not validate_full_name(text):
+            await api.send_message(
+                user_id,
+                "Укажите корректные ФИО: не менее двух слов, в каждом — больше одной буквы.",
+            )
+            return True
+        fsm.set_state(user_id, "user_phone", st.data | {"full_name": text.strip()})
+        await api.send_message(
+            user_id,
+            "Введите номер мобильного телефона, на кого будет оформлена карта "
+            "(формат +7 или 8 не важен).",
+        )
+        return True
+
+    if st.state == "user_phone":
+        if not validate_phone(text):
+            await api.send_message(
+                user_id,
+                "Укажите корректный номер телефона (не менее 10 цифр).",
+            )
+            return True
+        scenario_code = st.data["scenario_code"]
+        phone = text.strip()
+        fsm.set_state(
+            user_id,
+            "user_await_consent",
+            st.data | {"phone": phone, "max_name": max_name, "max_username": max_username},
+        )
+        await api.send_message_with_keyboard(
+            user_id,
+            "Ознакомьтесь с правилами сбора и хранения персональных данных и подтвердите согласие.",
+            user_consent_keyboard(scenario_code, settings.personal_data_policy_url),
+        )
+        return True
+
+    return False
 
 
 async def _handle_user_callback(
@@ -231,6 +318,29 @@ async def _handle_user_callback(
     await api.answer_callback(callback_id)
 
     if cb_payload == "user:noop":
+        return
+
+    if cb_payload.startswith("user:next:"):
+        scenario_code = cb_payload[len("user:next:"):]
+        scenario = repo.get_scenario_by_code(scenario_code)
+        if not scenario:
+            await api.send_message(user_id, "Сценарий не найден.")
+            return
+        if scenario.check_subscription:
+            channels = repo.list_scenario_channels(scenario.id)
+            if channels:
+                not_subscribed = []
+                for ch in channels:
+                    if not await api.is_user_member_of_channel(ch.chat_id, user_id):
+                        not_subscribed.append(ch)
+                if not_subscribed:
+                    await api.send_message_with_keyboard(
+                        user_id,
+                        "Для продолжения подпишитесь на каналы:",
+                        user_subscribe_keyboard(not_subscribed, scenario_code),
+                    )
+                    return
+        await _user_proceed_to_fio_after_checks(api, repo, user_id, scenario_code)
         return
 
     if cb_payload.startswith("user:check_sub:"):
@@ -254,7 +364,42 @@ async def _handle_user_callback(
             )
             return
 
-        await _issue_link(api, repo, user_id, scenario_code, max_name, max_username)
+        await _user_proceed_to_fio_after_checks(api, repo, user_id, scenario_code)
+        return
+
+    if cb_payload.startswith("user:consent:"):
+        scenario_code = cb_payload[len("user:consent:"):]
+        st = fsm.get_state(user_id)
+        if (
+            not st
+            or st.state != "user_await_consent"
+            or str(st.data.get("scenario_code")) != str(scenario_code)
+        ):
+            await api.send_message(user_id, "Сначала введите ФИО и номер телефона.")
+            return
+        full_name = st.data.get("full_name", "")
+        phone = st.data.get("phone", "")
+        mn = st.data.get("max_name") or max_name
+        mu = st.data.get("max_username") or max_username
+        flow = UserFlowService(repo, settings)
+        try:
+            link = flow.issue_personal_link(
+                user_id,
+                scenario_code,
+                full_name,
+                phone,
+                max_name=str(mn).strip() if mn else None,
+                max_username=str(mu).strip() if mu else None,
+            )
+        except ValueError as e:
+            await api.send_message(user_id, str(e))
+            return
+        fsm.clear_state(user_id)
+        await api.send_message_with_keyboard(
+            user_id,
+            "Для оформления карты на сайте банка перейдите по ссылке ниже.",
+            user_card_keyboard(link),
+        )
         return
 
 
@@ -513,20 +658,38 @@ async def _handle_admin_fsm_text(
         fsm.set_state(user_id, "broadcast_w_image", {"title": text.strip()})
         await api.send_message_with_keyboard(
             user_id,
-            "Пришлите URL картинки (https://…) или нажмите «Без картинки».",
+            "Пришлите картинку файлом или ссылкой (достаточно домена, https подставится сам), либо «Без картинки».",
             admin_broadcast_skip_image_keyboard(),
         )
         return True
 
     if state == "broadcast_w_image":
-        if not text.strip():
-            await api.send_message(user_id, "Пришлите URL картинки или нажмите «Без картинки».")
-            return True
-        url = text.strip()
-        if not url.startswith("http"):
-            await api.send_message(user_id, "Укажите полный URL, начиная с https://")
-            return True
-        fsm.set_state(user_id, "broadcast_w_text", st.data | {"image_url": url})
+        image_ref: str | None = None
+        for att in attachments or []:
+            att_type = att.get("type", "")
+            pld = att.get("payload", {}) or {}
+            url_candidate = pld.get("url") or pld.get("photo_url")
+            if url_candidate:
+                image_ref = url_candidate
+                break
+            if att_type in ("image", "photo") and pld.get("token"):
+                image_ref = pld["token"]
+                break
+
+        if image_ref is None:
+            if not (text or "").strip():
+                await api.send_message(
+                    user_id,
+                    "Пришлите картинку файлом, URL (https://…) или нажмите «Без картинки».",
+                )
+                return True
+            url = text.strip()
+            if not url.startswith("http"):
+                await api.send_message(user_id, "Укажите полный URL, начиная с https://, или отправьте фото.")
+                return True
+            image_ref = url
+
+        fsm.set_state(user_id, "broadcast_w_text", st.data | {"image_url": image_ref})
         await api.send_message(
             user_id,
             "Введите текст описания (основной текст уведомления для получателей):",
@@ -550,17 +713,14 @@ async def _handle_admin_fsm_text(
             await api.send_message(user_id, 'Введите текст кнопки или нажмите «Текст по умолчанию».')
             return True
         fsm.set_state(user_id, "broadcast_w_button_url", st.data | {"button_text": text.strip()})
-        await api.send_message(user_id, "Введите URL для кнопки (https://...):")
+        await api.send_message(user_id, "Введите URL для кнопки (можно без https://):")
         return True
 
     if state == "broadcast_w_button_url":
         if not text.strip():
             await api.send_message(user_id, "URL не может быть пустым.")
             return True
-        url = text.strip()
-        if not url.startswith("http"):
-            await api.send_message(user_id, "Укажите полный URL (https://...).")
-            return True
+        url = _normalize_broadcast_https_url(text)
         data = st.data | {"button_url": url}
         fsm.set_state(user_id, "broadcast_preview", data)
         preview = _format_broadcast_preview(data)
@@ -1157,8 +1317,15 @@ async def _handle_admin_callback(
         fsm.clear_state(user_id)
         await _edit(
             "Рассылка всем пользователям из базы лидов:\n"
-            "картинка (по желанию), описание, кнопка со ссылкой.\n"
+            "картинка файлом или по URL (по желанию), описание, кнопка со ссылкой.\n"
             "Можно отправить сразу или запланировать.",
+            admin_broadcast_entry_keyboard(),
+        )
+        return
+
+    if cb_payload == "admin:broadcast_history":
+        await _edit(
+            _build_broadcast_history_text(repo),
             admin_broadcast_entry_keyboard(),
         )
         return
@@ -1327,7 +1494,9 @@ async def handle_max_webhook(
 
         # FSM: подписчик
         if ev.update_type == "message_created":
-            handled = await _handle_user_fsm_text(api, repo, ev.user_id, ev.text, settings)
+            handled = await _handle_user_fsm_text(
+                api, repo, ev.user_id, ev.text, settings, ev.max_name, ev.max_username
+            )
             if handled:
                 return Response(status_code=200)
 
@@ -1366,7 +1535,9 @@ async def handle_max_webhook(
                 await api.send_message(ev.user_id, "Сценарий не найден. Используйте корректную ссылку.")
                 return Response(status_code=200)
 
-            # Формируем текст материала
+            fsm.clear_state(ev.user_id)
+
+            # Формируем текст материала (ТЗ: картинка + описание, затем «Далее»)
             parts = []
             if scenario.image_url:
                 parts.append(scenario.image_url)
@@ -1375,42 +1546,18 @@ async def handle_max_webhook(
             msg = "\n\n".join(parts) if parts else scenario.title
             msg = (msg or "").strip() or (scenario.title or "Акция")
 
-            if scenario.check_subscription:
-                # Показываем материал + список каналов + «Я подписался»
-                channels = repo.list_scenario_channels(scenario.id)
-                if channels:
-                    await api.send_message_with_keyboard(
-                        ev.user_id, msg,
-                        user_subscribe_keyboard(channels, scenario_code),
-                    )
-                else:
-                    # check_subscription включён, но каналов нет — выдаём ссылку сразу
-                    await _issue_link(api, repo, ev.user_id, scenario_code, ev.max_name, ev.max_username)
-            else:
-                # Без проверки подписки — генерируем ссылку сразу, показываем в том же сообщении
-                if not offer_produces_valid_links(scenario.offer):
-                    await api.send_message(
-                        ev.user_id,
-                        "Ошибка: у оффера не задана основная ссылка. Укажите её в админке (хотя бы домен, без https тоже можно).",
-                    )
-                    return Response(status_code=200)
-                try:
-                    subid = repo.next_subid(offer_id=scenario.offer_id)
-                    final_link = build_offer_link(offer=scenario.offer, subid_value=subid)
-                    repo.create_lead(
-                        user_id=ev.user_id,
-                        scenario_id=scenario.id,
-                        offer_id=scenario.offer_id,
-                        subid_value=subid,
-                        max_name=ev.max_name or None,
-                        max_username=ev.max_username or None,
-                    )
-                    await api.send_message_with_keyboard(
-                        ev.user_id, msg,
-                        user_material_keyboard(scenario_code, final_link),
-                    )
-                except ValueError as e:
-                    await api.send_message(ev.user_id, f"Ошибка: {e}")
+            if not offer_produces_valid_links(scenario.offer):
+                await api.send_message(
+                    ev.user_id,
+                    "Ошибка: у оффера не задана основная ссылка. Укажите её в админке (хотя бы домен, без https тоже можно).",
+                )
+                return Response(status_code=200)
+
+            await api.send_message_with_keyboard(
+                ev.user_id,
+                msg,
+                user_material_keyboard(scenario_code, None),
+            )
 
             return Response(status_code=200)
 

@@ -196,6 +196,14 @@ class Repo:
     def get_broadcast(self, broadcast_id: int) -> models.Broadcast | None:
         return self.db.get(models.Broadcast, broadcast_id)
 
+    def list_broadcasts_recent(self, limit: int = 20) -> list[models.Broadcast]:
+        stmt = (
+            select(models.Broadcast)
+            .order_by(models.Broadcast.id.desc())
+            .limit(limit)
+        )
+        return list(self.db.scalars(stmt))
+
     def list_scheduled_broadcasts_with_send_at(self) -> list[models.Broadcast]:
         """Все отложенные по send_at (для восстановления планировщика после рестарта)."""
         stmt = (

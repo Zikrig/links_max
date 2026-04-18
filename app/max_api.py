@@ -213,6 +213,28 @@ class MaxApiClient:
             logger.warning("Image upload failed: %s", exc)
             return None
 
+    async def resolve_broadcast_image_token(self, stored: str | None) -> str | None:
+        """Один раз на рассылку: https — скачать и получить token; иначе считаем, что это уже token."""
+        if not (stored or "").strip():
+            return None
+        raw = stored.strip()
+        if raw.startswith("http://") or raw.startswith("https://"):
+            filename = "image.jpg"
+            try:
+                path_part = raw.split("?", 1)[0].rstrip("/").split("/")[-1]
+                if path_part and "." in path_part:
+                    filename = path_part[-120:]
+            except Exception:
+                pass
+            try:
+                img_resp = await self.client.get(raw, follow_redirects=True, timeout=45.0)
+                if img_resp.status_code == 200 and img_resp.content:
+                    return await self.upload_image(img_resp.content, filename)
+            except Exception as exc:
+                logger.warning("broadcast: не удалось скачать картинку %s: %s", raw, exc)
+            return None
+        return raw
+
     async def send_broadcast_message(
         self,
         user_id: int,
@@ -222,8 +244,9 @@ class MaxApiClient:
         image_url: str | None = None,
     ) -> None:
         """
-        Рассылка: текст + кнопка-ссылка; при image_url — картинка через token после загрузки по URL.
-        При ошибке комбинации — fallback: текст с URL картинки + описание + кнопка.
+        Рассылка: текст + кнопка; при image_url — вложение image (значение — token MAX,
+        заранее получите через resolve_broadcast_image_token).
+        При ошибке вложения — только текст + кнопка (без ссылки на картинку в тексте).
         """
         params = {"user_id": user_id} if user_id > 0 else {"chat_id": user_id}
         kb = {
@@ -237,21 +260,7 @@ class MaxApiClient:
             await self.send_message_with_button(user_id, text, button_text, button_url)
             return
 
-        raw_url = image_url.strip()
-        token: str | None = None
-        filename = "image.jpg"
-        try:
-            path_part = raw_url.split("?", 1)[0].rstrip("/").split("/")[-1]
-            if path_part and "." in path_part:
-                filename = path_part[-120:]
-        except Exception:
-            pass
-        try:
-            img_resp = await self.client.get(raw_url, follow_redirects=True, timeout=45.0)
-            if img_resp.status_code == 200 and img_resp.content:
-                token = await self.upload_image(img_resp.content, filename)
-        except Exception as exc:
-            logger.warning("broadcast: не удалось скачать картинку %s: %s", raw_url, exc)
+        token = image_url.strip()
 
         if token:
             body_text = text.strip() or " "
@@ -278,10 +287,12 @@ class MaxApiClient:
                 )
                 break
 
-        combined = f"{raw_url}\n\n{text}".strip()
-        if len(combined) > 4000:
-            combined = combined[:3997] + "..."
-        await self.send_message_with_button(user_id, combined, button_text, button_url)
+        logger.warning(
+            "broadcast: не удалось отправить сообщение с картинкой, только текст+кнопка (token=%s)",
+            (token[:24] + "…") if len(token) > 24 else token,
+        )
+        body = text.strip() or " "
+        await self.send_message_with_button(user_id, body, button_text, button_url)
 
     async def get_me(self) -> dict:
         """Получить информацию о боте (user_id и др.)."""

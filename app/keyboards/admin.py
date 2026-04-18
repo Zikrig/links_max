@@ -209,6 +209,7 @@ def build_keyboard_attachment(buttons: list) -> dict:
 def admin_broadcast_entry_keyboard() -> list:
     return [
         [_btn("✉️ Создать рассылку", "admin:broadcast_new")],
+        [_btn("📋 История рассылок", "admin:broadcast_history")],
         [_btn("🔙 Назад", "admin:main")],
     ]
 
