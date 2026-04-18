@@ -13,7 +13,9 @@ class Platform(Base):
     name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    offers: Mapped[list["Offer"]] = relationship(back_populates="platform")
+    offers: Mapped[list["Offer"]] = relationship(
+        back_populates="platform", cascade="all, delete-orphan"
+    )
 
 
 class Offer(Base):
@@ -28,7 +30,9 @@ class Offer(Base):
     next_subid: Mapped[int] = mapped_column(Integer, default=1)
 
     platform: Mapped["Platform"] = relationship(back_populates="offers")
-    scenarios: Mapped[list["Scenario"]] = relationship(back_populates="offer")
+    scenarios: Mapped[list["Scenario"]] = relationship(
+        back_populates="offer", cascade="all, delete-orphan"
+    )
     leads: Mapped[list["Lead"]] = relationship(back_populates="offer")
 
 
