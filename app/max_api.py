@@ -494,6 +494,95 @@ class MaxApiClient:
             return await _one(-chat_id)
         return None
 
+    @staticmethod
+    def _member_dict_user_id(mem: dict) -> int | None:
+        if not isinstance(mem, dict):
+            return None
+        uid = mem.get("user_id")
+        if uid is None:
+            u = mem.get("user")
+            if isinstance(u, dict):
+                uid = u.get("user_id")
+        if uid is None:
+            return None
+        try:
+            return int(uid)
+        except (TypeError, ValueError):
+            return None
+
+    async def _fetch_members_by_user_ids(self, chat_id: int, user_id: int) -> list:
+        """GET /chats/{id}/members?user_ids=… — надёжнее точечного /members/{uid} при сбоях API."""
+
+        async def _one(cid: int) -> list:
+            try:
+                response = await self._request(
+                    "GET",
+                    f"/chats/{cid}/members",
+                    params=[("user_ids", user_id)],
+                )
+                if response.status_code != 200:
+                    return []
+                data = response.json()
+                if not isinstance(data, dict):
+                    return []
+                return data.get("members") or []
+            except Exception:
+                return []
+
+        ms = await _one(chat_id)
+        if ms:
+            return ms
+        if chat_id != 0:
+            return await _one(-chat_id)
+        return []
+
+    async def _fetch_members_page(self, chat_id: int, marker: int | None) -> tuple[list, int | None]:
+        params: list = [("count", 100)]
+        if marker is not None:
+            params.append(("marker", marker))
+        try:
+            response = await self._request("GET", f"/chats/{chat_id}/members", params=params)
+            if response.status_code != 200:
+                return [], None
+            data = response.json()
+            if not isinstance(data, dict):
+                return [], None
+            members = data.get("members") or []
+            next_m = data.get("marker")
+            try:
+                next_marker = int(next_m) if next_m is not None else None
+            except (TypeError, ValueError):
+                next_marker = None
+            return members, next_marker
+        except Exception:
+            return [], None
+
+    async def is_user_member_of_channel(self, chat_id: int, user_id: int) -> bool:
+        """
+        Участник канала/чата или нет. Сначала GET …/members/{user_id}, затем
+        …/members?user_ids=… и постраничный обход (как в check_subscribe / MAX_README).
+        """
+        raw = await self.get_chat_member(chat_id, user_id)
+        if raw is not None and not (isinstance(raw, dict) and not raw):
+            return True
+
+        filtered = await self._fetch_members_by_user_ids(chat_id, user_id)
+        if filtered:
+            logger.debug("member check: user_ids filter matched chat_id=%s user_id=%s", chat_id, user_id)
+            return True
+
+        for cid in (chat_id, -chat_id) if chat_id != 0 else (chat_id,):
+            marker: int | None = None
+            for _ in range(40):
+                members, marker = await self._fetch_members_page(cid, marker)
+                for mem in members:
+                    if self._member_dict_user_id(mem) == user_id:
+                        logger.debug("member check: page scan matched chat_id=%s user_id=%s", cid, user_id)
+                        return True
+                if marker is None:
+                    break
+        return False
+
     async def upload_file(self, file_bytes: bytes, filename: str) -> str | None:
         """Загрузить файл в MAX, вернуть token для использования в сообщении."""
         # См. https://dev.max.ru/docs-api/methods/POST/uploads — загрузка по url:
@@ -541,12 +630,25 @@ class MaxApiClient:
         """Отправить загруженный файл пользователю."""
         params = {"user_id": user_id} if user_id > 0 else {"chat_id": user_id}
         payload: dict = {
+            "text": (caption.strip() or " "),
             "attachments": [{"type": "file", "payload": {"token": token}}],
         }
-        if caption:
-            payload["text"] = caption
-        response = await self._request("POST", "/messages", params=params, json=payload)
-        response.raise_for_status()
+        # MAX: сразу после POST на upload URL файл может ещё обрабатываться — 400 attachment.not.ready
+        for attempt in range(8):
+            response = await self._request("POST", "/messages", params=params, json=payload)
+            if response.status_code < 400:
+                response.raise_for_status()
+                return
+            err_body = (response.text or "")[:800]
+            if response.status_code == 400 and "attachment.not.ready" in err_body and attempt < 7:
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            logger.warning(
+                "POST /messages file failed %s: %s",
+                response.status_code,
+                err_body,
+            )
+            response.raise_for_status()
 
     async def answer_callback_with_edit(
         self, callback_id: str, text: str, buttons: list | None = None

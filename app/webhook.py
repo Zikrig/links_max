@@ -243,8 +243,7 @@ async def _handle_user_callback(
         channels = repo.list_scenario_channels(scenario.id)
         not_subscribed = []
         for ch in channels:
-            member = await api.get_chat_member(ch.chat_id, user_id)
-            if not member:
+            if not await api.is_user_member_of_channel(ch.chat_id, user_id):
                 not_subscribed.append(ch)
 
         if not_subscribed:
