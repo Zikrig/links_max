@@ -248,6 +248,8 @@ class MaxApiClient:
         if not (stored or "").strip():
             return None
         raw = stored.strip()
+        if raw.startswith("//"):
+            raw = "https:" + raw
         if raw.startswith("http://") or raw.startswith("https://"):
             filename = "image.jpg"
             try:

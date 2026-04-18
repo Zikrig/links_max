@@ -21,6 +21,7 @@ from app.keyboards.admin import (
     admin_broadcast_preview_keyboard,
     admin_broadcast_schedule_cancel_keyboard,
     admin_broadcast_skip_image_keyboard,
+    admin_broadcast_skip_text_keyboard,
     admin_channels_keyboard,
     admin_confirm_delete_keyboard,
     admin_export_offers_keyboard,
@@ -73,6 +74,26 @@ def _get_cached_settings() -> Settings:
     return get_settings()
 
 
+def _extract_broadcast_image_ref(attachments: list | None) -> str | None:
+    """URL или token картинки из вложений MAX (разные формы payload)."""
+    for att in attachments or []:
+        att_type = (att.get("type") or "").lower()
+        pld = att.get("payload")
+        if not isinstance(pld, dict):
+            continue
+        url_candidate = pld.get("url") or pld.get("photo_url") or pld.get("link")
+        if url_candidate:
+            return str(url_candidate).strip()
+        nested = pld.get("photo")
+        if isinstance(nested, dict):
+            u = nested.get("url") or nested.get("token")
+            if u:
+                return str(u).strip()
+        if att_type in ("image", "photo", "picture", "sticker") and pld.get("token"):
+            return str(pld["token"]).strip()
+    return None
+
+
 def _normalize_broadcast_https_url(raw: str) -> str:
     """Для рассылки: если схемы нет — подставить https://."""
     t = raw.strip()
@@ -95,7 +116,11 @@ def _format_broadcast_preview(data: dict) -> str:
         lines.append("Картинка: —")
     else:
         lines.append("Картинка: да")
-    lines.extend(["", data.get("text", ""), ""])
+    body = (data.get("text") or "").strip()
+    if body:
+        lines.extend(["", body, ""])
+    else:
+        lines.extend(["", f"Текст у получателя: заголовок «{data.get('title', '')}»", ""])
     btn = data.get("button_text") or _BROADCAST_DEFAULT_BUTTON_TEXT
     lines.append(f"Кнопка: «{btn}» → {data.get('button_url', '')}")
     return "\n".join(lines)
@@ -667,17 +692,7 @@ async def _handle_admin_fsm_text(
         return True
 
     if state == "broadcast_w_image":
-        image_ref: str | None = None
-        for att in attachments or []:
-            att_type = att.get("type", "")
-            pld = att.get("payload", {}) or {}
-            url_candidate = pld.get("url") or pld.get("photo_url")
-            if url_candidate:
-                image_ref = url_candidate
-                break
-            if att_type in ("image", "photo") and pld.get("token"):
-                image_ref = pld["token"]
-                break
+        image_ref = _extract_broadcast_image_ref(attachments)
 
         if image_ref is None:
             if not (text or "").strip():
@@ -692,16 +707,29 @@ async def _handle_admin_fsm_text(
             )
             return True
 
-        fsm.set_state(user_id, "broadcast_w_text", st.data | {"image_url": image_ref})
-        await api.send_message(
+        token_ready = await api.resolve_broadcast_image_token(image_ref)
+        if not token_ready:
+            await api.send_message(
+                user_id,
+                "Не удалось сохранить изображение. Отправьте файл ещё раз или «Без картинки».",
+            )
+            return True
+
+        fsm.set_state(user_id, "broadcast_w_text", st.data | {"image_url": token_ready})
+        await api.send_message_with_keyboard(
             user_id,
-            "Введите текст описания (основной текст уведомления для получателей):",
+            "Введите текст уведомления или нажмите «Без текста».",
+            admin_broadcast_skip_text_keyboard(),
         )
         return True
 
     if state == "broadcast_w_text":
         if not text.strip():
-            await api.send_message(user_id, "Текст не может быть пустым.")
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите текст или нажмите «Без текста».",
+                admin_broadcast_skip_text_keyboard(),
+            )
             return True
         fsm.set_state(user_id, "broadcast_w_button_text", st.data | {"text": text.strip()})
         await api.send_message_with_keyboard(
@@ -819,22 +847,29 @@ async def _handle_admin_callback(
             await api.send_message_with_keyboard(user_id, text, buttons or [])
         await _ack()
 
-    async def _edit_then_ask(text_edit: str, question: str) -> None:
-        """Убрать кнопки в текущем сообщении, задать вопрос новым. Сохраняет message_id в FSM."""
+    async def _edit_then_ask(
+        text_edit: str, question: str, question_buttons: list | None = None
+    ) -> None:
+        """Убрать клавиатуру в текущем сообщении, задать вопрос новым. Сохраняет message_id в FSM."""
         nonlocal _acked
-        # Убираем клавиатуру через answer с пустым сообщением
         if callback_id:
             ok = await api.answer_callback_with_edit(callback_id, text_edit, buttons=None)
             if ok:
                 _acked = True
                 fsm.update_data(user_id, _msg_id=message_id, _msg_text=text_edit)
-                await api.send_message(user_id, question)
+                if question_buttons is not None:
+                    await api.send_message_with_keyboard(user_id, question, question_buttons)
+                else:
+                    await api.send_message(user_id, question)
                 return
         if message_id:
             await api.edit_message(message_id, text_edit, buttons=None)
             fsm.update_data(user_id, _msg_id=message_id, _msg_text=text_edit)
         await _ack()
-        await api.send_message(user_id, question)
+        if question_buttons is not None:
+            await api.send_message_with_keyboard(user_id, question, question_buttons)
+        else:
+            await api.send_message(user_id, question)
 
     if cb_payload == "admin:main":
         fsm.clear_state(user_id)
@@ -1324,7 +1359,7 @@ async def _handle_admin_callback(
         fsm.clear_state(user_id)
         await _edit(
             "Рассылка всем пользователям из базы лидов:\n"
-            "изображение (по желанию), текст, кнопка с переходом.\n"
+            "изображение (по желанию), текст (можно пропустить), кнопка.\n"
             "Можно отправить сразу или запланировать.",
             admin_broadcast_entry_keyboard(),
         )
@@ -1353,7 +1388,22 @@ async def _handle_admin_callback(
         fsm.set_state(user_id, "broadcast_w_text", st.data | {"image_url": None})
         await _edit_then_ask(
             "Без картинки",
-            "Введите текст описания (основной текст уведомления для получателей):",
+            "Введите текст уведомления или нажмите «Без текста».",
+            admin_broadcast_skip_text_keyboard(),
+        )
+        return
+
+    if cb_payload == "admin:broadcast_skip_text":
+        st = fsm.get_state(user_id)
+        if not st or st.state != "broadcast_w_text":
+            await _ack()
+            return
+        fsm.set_state(user_id, "broadcast_w_button_text", st.data | {"text": ""})
+        await _edit_then_ask(
+            "Без текста",
+            f"Введите текст на кнопке.\n\n"
+            f"По умолчанию: «{_BROADCAST_DEFAULT_BUTTON_TEXT}» — или нажмите кнопку с этой надписью ниже.",
+            admin_broadcast_default_button_keyboard(_BROADCAST_DEFAULT_BUTTON_TEXT),
         )
         return
 

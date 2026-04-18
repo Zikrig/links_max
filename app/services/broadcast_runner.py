@@ -109,20 +109,25 @@ async def run_broadcast(broadcast_id: int) -> None:
                 return
 
             text = b.text
+            title = b.title
             button_text = b.button_text
             button_url = b.button_url
             image_stored = b.image_url
         finally:
             db.close()
 
+        body_text = (text or "").strip() or (title or "").strip() or " "
+
         image_token = await api.resolve_broadcast_image_token(image_stored)
+        if image_stored and not image_token:
+            logger.warning("broadcast id=%s: изображение не подготовлено (пропуск вложения)", broadcast_id)
 
         try:
             for uid in recipients:
                 try:
                     await api.send_broadcast_message(
                         uid,
-                        text,
+                        body_text,
                         button_text,
                         button_url,
                         image_url=image_token,
