@@ -1138,14 +1138,19 @@ async def handle_max_webhook(
             return Response(status_code=200)
 
         # bot_started: text = значение ?start= из deep link
-        # message_created: поддерживаем /start <code> как fallback для тестов
-        scenario_code = ""
+        # message_created: /start <code> как fallback, а также полный URL deep link
         scenario_code = ""
         if ev.update_type == "bot_started":
             scenario_code = ev.text
         elif ev.text.startswith("/start"):
             parts = ev.text.split(maxsplit=1)
             scenario_code = parts[1] if len(parts) > 1 else ""
+        elif "start=" in ev.text and "max.ru" in ev.text:
+            # MAX присылает message_created с полным URL: https://max.ru/join/bot?start=sc9ac188ca
+            try:
+                scenario_code = ev.text.split("start=", 1)[1].split("&")[0].strip()
+            except Exception:
+                pass
 
         if scenario_code:
             scenario = repo.get_scenario_by_code(scenario_code)
