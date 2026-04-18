@@ -27,7 +27,6 @@ from app.keyboards.admin import (
     admin_scenario_channels_keyboard,
     admin_scenario_select_offer_keyboard,
     admin_scenario_settings_keyboard,
-    admin_scenario_view_keyboard,
     admin_scenarios_keyboard,
 )
 from app.keyboards.user import (
@@ -676,7 +675,7 @@ async def _handle_admin_callback(
             channels = repo.list_scenario_channels(scenario.id)
             await _edit(
                 f"Сценарий оффера «{offer.name}»:",
-                admin_scenario_settings_keyboard(scenario, channels),
+                admin_scenario_settings_keyboard(scenario, channels, back_payload=f"admin:offer_view:{offer_id}"),
             )
         else:
             fsm.set_state(user_id, "scenario_add_title", {"offer_id": offer_id, "_msg_id": message_id})
@@ -692,9 +691,10 @@ async def _handle_admin_callback(
         if not scenario:
             return
         channels = repo.list_scenario_channels(scenario_id)
+        offer_id = scenario.offer_id
         await _edit(
             f"Сценарий оффера:",
-            admin_scenario_settings_keyboard(scenario, channels),
+            admin_scenario_settings_keyboard(scenario, channels, back_payload=f"admin:offer_view:{offer_id}"),
         )
         return
 
@@ -862,11 +862,10 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        bot_link = getattr(scenario, "bot_link", None)
-        link_text = f"\nСсылка: {bot_link.deep_link}" if bot_link else ""
+        channels = repo.list_scenario_channels(scenario_id)
         await _edit(
-            f"Сценарий: {scenario.title}\nКод: {scenario.code}\nОписание: {scenario.description}{link_text}",
-            admin_scenario_view_keyboard(scenario_id),
+            f"Сценарий: {scenario.title}",
+            admin_scenario_settings_keyboard(scenario, channels, back_payload="admin:scenarios"),
         )
         return
 
@@ -874,9 +873,11 @@ async def _handle_admin_callback(
         scenario_id = int(cb_payload.split(":")[-1])
         scenario = repo.db.get(Scenario, scenario_id)
         name = scenario.title if scenario else f"#{scenario_id}"
+        # Определяем, откуда пришли (из списка или из оффера), чтобы вернуться туда после отмены
+        cancel_back = f"admin:scenario_view:{scenario_id}"
         await _edit(
             f"Удалить сценарий «{name}»?",
-            admin_confirm_delete_keyboard(f"admin:scenario_delete_yes:{scenario_id}", f"admin:scenario_view:{scenario_id}"),
+            admin_confirm_delete_keyboard(f"admin:scenario_delete_yes:{scenario_id}", cancel_back),
         )
         return
 
