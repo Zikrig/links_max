@@ -4,7 +4,6 @@ import asyncio
 import logging
 import re
 import time
-from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
@@ -17,35 +16,46 @@ class RateLimitError(Exception):
     """MAX API вернул 429 и исчерпан лимит ожидания."""
 
 
-def _chat_link_candidates(raw: str) -> list[str]:
-    """Фрагменты из URL для GET /chats/{link} (см. документацию MAX)."""
-    raw = raw.strip()
-    if not raw:
-        return []
+def normalize_max_url(url: str) -> str:
+    """Как в max_users_resend: единый вид ссылки для сравнения."""
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        u = "https://" + u
+    return u.rstrip("/")
+
+
+def extract_join_token(url: str) -> str:
+    m = re.search(r"/join/([^/?#]+)", url, re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def links_match(a: str, b: str) -> bool:
+    return normalize_max_url(a).lower() == normalize_max_url(b).lower()
+
+
+def try_parse_chat_id_from_text(text: str) -> int | None:
+    """Число или max.ru/c/-123/... в тексте ссылки."""
+    raw = text.strip()
     if re.fullmatch(r"-?\d+", raw):
-        return []
-    out: list[str] = []
-    url = raw
-    if not re.match(r"^https?://", raw, re.I):
-        if "/" not in raw and "?" not in raw:
-            out.append(raw.lstrip("@"))
-            return list(dict.fromkeys(out))
-        url = "https://" + raw.lstrip("/")
-    try:
-        p = urlparse(url)
-        segs = [unquote(s) for s in p.path.strip("/").split("/") if s]
-        for seg in reversed(segs):
-            seg = seg.split("?")[0].strip()
-            if not seg or re.fullmatch(r"-?\d+", seg):
-                continue
-            out.append(seg.lstrip("@"))
-    except Exception:
-        pass
-    if not out:
-        t = raw.lstrip("@").strip()
-        if t and not re.fullmatch(r"-?\d+", t):
-            out.append(t)
-    return list(dict.fromkeys(out))
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    m = re.search(r"/c/(-?\d+)", raw)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _unwrap_chat_dict(data: dict | None) -> dict | None:
+    if not data:
+        return None
+    if isinstance(data.get("chat"), dict):
+        return data["chat"]
+    return data
 
 
 def _chat_id_from_payload(data: dict) -> int | None:
@@ -170,45 +180,99 @@ class MaxApiClient:
         except Exception:
             return {}
 
-    async def get_chat_by_link_token(self, token: str) -> dict | None:
-        """GET /chats/{link} — публичный идентификатор чата из ссылки."""
-        t = token.strip().lstrip("@")
-        if not t:
-            return None
-        path = quote(t, safe="")
+    async def fetch_chat_by_id(self, chat_id: int) -> dict | None:
+        """GET /chats/{chat_id} — как в max_users_resend."""
         try:
-            resp = await self._request("GET", f"/chats/{path}")
+            resp = await self._request("GET", f"/chats/{chat_id}")
             if resp.status_code != 200:
+                logger.debug("GET /chats/%s -> %s", chat_id, resp.status_code)
                 return None
             body = resp.json()
             if not isinstance(body, dict):
                 return None
-            if isinstance(body.get("chat"), dict):
-                return body["chat"]
-            return body
+            return _unwrap_chat_dict(body)
         except Exception as exc:
-            logger.debug("get_chat_by_link_token %r: %s", token, exc)
+            logger.warning("fetch_chat_by_id %s: %s", chat_id, exc)
             return None
+
+    async def find_chat_by_invite_url(self, url: str) -> tuple[int | None, dict | None, str]:
+        """
+        Список чатов бота GET /chats (с marker), сопоставление link и токена /join/...
+        Логика скопирована из max_users_resend.Config.find_chat_by_invite_url.
+        """
+        norm = normalize_max_url(url)
+        token = extract_join_token(norm)
+        marker: int | None = None
+        while True:
+            params: dict = {"count": 100}
+            if marker is not None:
+                params["marker"] = marker
+            try:
+                resp = await self._request("GET", "/chats", params=params)
+                if resp.status_code != 200:
+                    return None, None, f"Не удалось получить список чатов (HTTP {resp.status_code})."
+                data = resp.json()
+            except Exception as e:
+                return None, None, f"Ошибка запроса списка чатов: {e}"
+            chats = data.get("chats") or []
+            if not isinstance(chats, list):
+                chats = []
+            for c in chats:
+                if not isinstance(c, dict):
+                    continue
+                cid_raw = c.get("chat_id")
+                clink = (c.get("link") or "").strip()
+                if clink and links_match(clink, norm):
+                    try:
+                        cid = int(cid_raw) if cid_raw is not None else None
+                    except (TypeError, ValueError):
+                        cid = None
+                    if cid is not None:
+                        return cid, c, ""
+                if token and clink:
+                    if extract_join_token(clink) == token:
+                        try:
+                            cid = int(cid_raw) if cid_raw is not None else None
+                        except (TypeError, ValueError):
+                            cid = None
+                        if cid is not None:
+                            return cid, c, ""
+            next_m = data.get("marker")
+            if next_m is None or not chats:
+                break
+            try:
+                marker = int(next_m)
+            except (TypeError, ValueError):
+                break
+        return None, None, (
+            "Канал не найден среди чатов бота. Добавьте бота в канал как администратора "
+            "и пришлите ссылку-приглашение ещё раз."
+        )
 
     async def resolve_chat_from_invite_url(self, raw: str) -> tuple[bool, int | None, str]:
         """
-        Найти chat_id по ссылке-приглашению или публичной ссылке на канал.
+        Найти chat_id по ссылке (как max_users_resend.resolve_chat_from_input).
         Возвращает (успех, chat_id, title_или_текст_ошибки).
         """
-        candidates = _chat_link_candidates(raw)
-        if not candidates:
-            return False, None, "Отправьте ссылку на канал или приглашение, а не число (chat_id)."
-        for cand in candidates:
-            data = await self.get_chat_by_link_token(cand)
-            if not data:
-                continue
-            cid = _chat_id_from_payload(data)
-            title = str(data.get("title") or data.get("name") or cand)
-            if cid is not None:
+        raw = raw.strip()
+        if not raw:
+            return False, None, "Отправьте ссылку на канал или приглашение."
+
+        maybe_id = try_parse_chat_id_from_text(raw)
+        if maybe_id is not None:
+            info = await self.fetch_chat_by_id(maybe_id)
+            if info:
+                cid = _chat_id_from_payload(info) or maybe_id
+                title = str(info.get("title") or info.get("name") or str(cid))
                 return True, cid, title
-        return False, None, (
-            "Не удалось определить канал по ссылке. Проверьте ссылку и что бот видит этот канал в MAX."
-        )
+            return False, None, "Канал не найден по id из ссылки. Проверьте, что бот состоит в этом чате."
+
+        url_raw = raw if raw.startswith("http") else "https://" + raw.lstrip("/")
+        cid, info, err = await self.find_chat_by_invite_url(url_raw)
+        if cid is None or info is None:
+            return False, None, err
+        title = str(info.get("title") or info.get("name") or str(cid))
+        return True, cid, title
 
     async def check_chat_access(self, chat_id: int) -> tuple[bool, str]:
         """Проверить доступ бота к чату. Возвращает (ok, title/описание_ошибки)."""
