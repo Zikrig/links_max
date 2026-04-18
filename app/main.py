@@ -58,6 +58,10 @@ async def lifespan(_: FastAPI):
         await max_api.close()
 
 
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
+
 app = FastAPI(title="MAX Lead Bot", lifespan=lifespan)
 
 # Важен порядок: сначала admin роуты, потом user.
