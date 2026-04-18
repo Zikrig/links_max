@@ -334,7 +334,7 @@ async def _handle_admin_fsm_text(
             )
             settings = _get_cached_settings()
             if settings.bot_username:
-                deep_link = f"https://max.ru/join/{settings.bot_username}?start={scenario.code}"
+                deep_link = f"https://max.ru/{settings.bot_username}?start={scenario.code}"
             else:
                 deep_link = f"https://max.ru/start?start={scenario.code}"
             repo.create_or_update_bot_link(scenario.id, deep_link)
