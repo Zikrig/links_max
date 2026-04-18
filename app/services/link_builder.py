@@ -1,8 +1,21 @@
 from app.db.models import Offer
 
 
+def _normalize_base_url(raw: str) -> str:
+    """Если схемы нет — подставляем https:// (как в браузере при вводе домена без протокола)."""
+    base = raw.strip().rstrip("?&")
+    if not base:
+        return ""
+    lower = base.lower()
+    if lower.startswith("https://") or lower.startswith("http://"):
+        return base
+    if base.startswith("//"):
+        return "https:" + base
+    return "https://" + base.lstrip("/")
+
+
 def build_offer_link(offer: Offer, subid_value: str) -> str:
-    base = offer.base_url.strip().rstrip("?&")
+    base = _normalize_base_url(offer.base_url or "")
     sep = "&" if "?" in base else "?"
     return f"{base}{sep}{offer.subid_param}={subid_value}"
 

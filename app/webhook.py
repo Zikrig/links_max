@@ -158,8 +158,7 @@ async def _issue_link(
     if not offer_produces_valid_links(scenario.offer):
         await api.send_message(
             user_id,
-            "Ошибка: у оффера не задана полная ссылка (должна начинаться с https://). "
-            "Укажите основной URL оффера в админке.",
+            "Ошибка: у оффера не задана основная ссылка. Укажите её в админке (хотя бы домен, без https тоже можно).",
         )
         return
 
@@ -1191,8 +1190,7 @@ async def handle_max_webhook(
                 if not offer_produces_valid_links(scenario.offer):
                     await api.send_message(
                         ev.user_id,
-                        "Ошибка: у оффера не задана полная ссылка (должна начинаться с https://). "
-                        "Укажите основной URL оффера в админке.",
+                        "Ошибка: у оффера не задана основная ссылка. Укажите её в админке (хотя бы домен, без https тоже можно).",
                     )
                     return Response(status_code=200)
                 try:
