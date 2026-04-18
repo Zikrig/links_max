@@ -467,17 +467,34 @@ async def _handle_admin_callback(
             await api.answer_callback(callback_id)
 
     async def _edit(text: str, buttons: list | None = None) -> None:
+        nonlocal _acked
+        # Приоритет 1: POST /answers с message — атомарный ack+edit в одном запросе.
+        # Не попадает под rate-limit PUT /messages.
+        if callback_id:
+            ok = await api.answer_callback_with_edit(callback_id, text, buttons)
+            if ok:
+                _acked = True  # callback уже подтверждён внутри answer_callback_with_edit
+                return
+        # Приоритет 2: PUT /messages (отдельный запрос)
         edited = False
         if message_id:
             edited = await api.edit_message(message_id, text, buttons)
-            if not edited:
-                logger.warning("edit_message failed for mid=%r, falling back to new message", message_id)
         if not edited:
+            logger.warning("edit failed mid=%r — new message fallback", message_id)
             await api.send_message_with_keyboard(user_id, text, buttons or [])
         await _ack()
 
     async def _edit_then_ask(text_edit: str, question: str) -> None:
         """Убрать кнопки в текущем сообщении, задать вопрос новым. Сохраняет message_id в FSM."""
+        nonlocal _acked
+        # Убираем клавиатуру через answer с пустым сообщением
+        if callback_id:
+            ok = await api.answer_callback_with_edit(callback_id, text_edit, buttons=None)
+            if ok:
+                _acked = True
+                fsm.update_data(user_id, _msg_id=message_id)
+                await api.send_message(user_id, question)
+                return
         if message_id:
             await api.edit_message(message_id, text_edit, buttons=None)
             fsm.update_data(user_id, _msg_id=message_id)

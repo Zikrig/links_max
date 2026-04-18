@@ -203,10 +203,39 @@ class MaxApiClient:
         response = await self._request("POST", "/messages", params=params, json=payload)
         response.raise_for_status()
 
+    async def answer_callback_with_edit(
+        self, callback_id: str, text: str, buttons: list | None = None
+    ) -> bool:
+        """
+        Обновить сообщение через POST /answers с message-payload.
+        Это атомарно (ack + edit в одном запросе) и обычно не попадает
+        под тот же rate-limit что PUT /messages.
+        Возвращает True если успешно.
+        """
+        msg_body: dict = {"text": text}
+        if buttons:
+            msg_body["attachments"] = [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]
+        else:
+            msg_body["attachments"] = []
+        try:
+            response = await self._request(
+                "POST", "/answers",
+                fast_fail_429=True,
+                params={"callback_id": callback_id},
+                json={"message": msg_body, "notification": " "},
+            )
+            if response.status_code in (200, 204):
+                return True
+            logger.warning("answer_callback_with_edit failed %s: %s", response.status_code, response.text[:300])
+            return False
+        except Exception as exc:
+            logger.warning("answer_callback_with_edit exception: %s", exc)
+            return False
+
     async def edit_message(self, message_id: str, text: str, buttons: list | None = None) -> bool:
         """
-        Редактировать существующее сообщение. Fast-fail на 429.
-        Возвращает True если успешно, False если нет.
+        Редактировать сообщение через PUT /messages. Fast-fail на 429.
+        Используется как fallback если answer_callback_with_edit недоступен.
         """
         body: dict = {"text": text}
         if buttons:
