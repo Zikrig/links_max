@@ -13,6 +13,7 @@ from app.db.repo import Repo
 from app.keyboards.admin import (
     admin_bot_links_keyboard,
     admin_channels_keyboard,
+    admin_confirm_delete_keyboard,
     admin_export_offers_keyboard,
     admin_export_platforms_keyboard,
     admin_main_keyboard,
@@ -258,6 +259,14 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
         return False
 
     state = st.state
+    msg_id: str = st.data.get("_msg_id", "")
+
+    async def _reply(reply_text: str, buttons: list | None = None) -> None:
+        """Если есть сохранённый msg_id — редактируем его, иначе новое сообщение."""
+        if msg_id and buttons is not None:
+            await api.edit_message(msg_id, reply_text, buttons)
+        else:
+            await api.send_message_with_keyboard(user_id, reply_text, buttons or [])
 
     if state == "platform_add":
         if not text:
@@ -266,9 +275,7 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
         repo.create_platform(text)
         fsm.clear_state(user_id)
         platforms = repo.list_platforms()
-        await api.send_message_with_keyboard(
-            user_id, f"✅ Платформа «{text}» добавлена.", admin_platforms_keyboard(platforms)
-        )
+        await _reply(f"✅ Платформа «{text}» добавлена.", admin_platforms_keyboard(platforms))
         return True
 
     if state == "offer_add_name":
@@ -305,8 +312,7 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
             offers = repo.list_offers_for_platform(platform_id)
             example_link = data["base_url"]
             sep = "&" if "?" in example_link else "?"
-            await api.send_message_with_keyboard(
-                user_id,
+            await _reply(
                 f"✅ Оффер «{data['name']}» добавлен.\n\nПример ссылки:\n{example_link}{sep}{subid_param}=0001",
                 admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}", platform_id=platform_id),
             )
@@ -315,7 +321,7 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
         return True
 
     if state == "channel_add_title":
-        fsm.set_state(user_id, "channel_add_id", {"title": text})
+        fsm.set_state(user_id, "channel_add_id", st.data | {"title": text})
         await api.send_message(user_id, "Введите chat_id канала\n(отрицательное число, например: -1001234567890):")
         return True
 
@@ -340,9 +346,7 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
                 invite_link=invite_link,
             )
             channels = repo.list_required_channels()
-            await api.send_message_with_keyboard(
-                user_id, f"✅ Канал «{data['title']}» добавлен.", admin_channels_keyboard(channels)
-            )
+            await _reply(f"✅ Канал «{data['title']}» добавлен.", admin_channels_keyboard(channels))
         except Exception as e:
             await api.send_message(user_id, f"Ошибка добавления канала: {e}")
         return True
@@ -374,11 +378,10 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
             if settings.bot_username:
                 deep_link = f"https://max.ru/join/{settings.bot_username}?start={scenario.code}"
             else:
-                deep_link = f"https://max.ru/start?start={scenario.code}"  # fallback без bot_username
+                deep_link = f"https://max.ru/start?start={scenario.code}"
             repo.create_or_update_bot_link(scenario.id, deep_link)
             scenarios = repo.list_scenarios()
-            await api.send_message_with_keyboard(
-                user_id,
+            await _reply(
                 f"✅ Сценарий «{data['title']}» создан.\n\nКод: {scenario.code}\nСсылка: {deep_link}",
                 admin_scenarios_keyboard(scenarios),
             )
@@ -406,9 +409,10 @@ async def _handle_admin_callback(
             await api.send_message_with_keyboard(user_id, text, buttons or [])
 
     async def _edit_then_ask(text_edit: str, question: str) -> None:
-        """Убрать кнопки в текущем сообщении, задать вопрос новым."""
+        """Убрать кнопки в текущем сообщении, задать вопрос новым. Сохраняет message_id в FSM."""
         if message_id:
             await api.edit_message(message_id, text_edit, buttons=None)
+            fsm.update_data(user_id, _msg_id=message_id)
         await api.send_message(user_id, question)
 
     if cb_payload == "admin:main":
@@ -449,10 +453,21 @@ async def _handle_admin_callback(
 
     if cb_payload.startswith("admin:platform_delete:"):
         platform_id = int(cb_payload.split(":")[-1])
+        from app.db.models import Platform as _Platform2
+        platform = repo.db.get(_Platform2, platform_id)
+        name = platform.name if platform else f"#{platform_id}"
+        await _edit(
+            f"Удалить платформу «{name}»?\nВсе офферы платформы также будут удалены.",
+            admin_confirm_delete_keyboard(f"admin:platform_delete_yes:{platform_id}", f"admin:platform_view:{platform_id}"),
+        )
+        return
+
+    if cb_payload.startswith("admin:platform_delete_yes:"):
+        platform_id = int(cb_payload.split(":")[-1])
         try:
             repo.delete_platform(platform_id)
             platforms = repo.list_platforms()
-            await _edit("Платформа удалена.", admin_platforms_keyboard(platforms))
+            await _edit("✅ Платформа удалена.", admin_platforms_keyboard(platforms))
         except Exception as e:
             await _edit(f"Ошибка удаления: {e}")
         return
@@ -498,14 +513,24 @@ async def _handle_admin_callback(
     if cb_payload.startswith("admin:offer_delete:"):
         offer_id = int(cb_payload.split(":")[-1])
         offer = repo.db.get(Offer, offer_id)
+        name = offer.name if offer else f"#{offer_id}"
+        await _edit(
+            f"Удалить оффер «{name}»?",
+            admin_confirm_delete_keyboard(f"admin:offer_delete_yes:{offer_id}", f"admin:offer_view:{offer_id}"),
+        )
+        return
+
+    if cb_payload.startswith("admin:offer_delete_yes:"):
+        offer_id = int(cb_payload.split(":")[-1])
+        offer = repo.db.get(Offer, offer_id)
         platform_id = offer.platform_id if offer else None
         try:
             repo.delete_offer(offer_id)
             if platform_id:
                 offers = repo.list_offers_for_platform(platform_id)
-                await _edit("Оффер удалён.", admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}", platform_id=platform_id))
+                await _edit("✅ Оффер удалён.", admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}", platform_id=platform_id))
             else:
-                await _edit("Оффер удалён.")
+                await _edit("✅ Оффер удалён.")
         except Exception as e:
             await _edit(f"Ошибка удаления: {e}")
         return
@@ -547,13 +572,23 @@ async def _handle_admin_callback(
 
     if cb_payload.startswith("admin:scenario_delete:"):
         scenario_id = int(cb_payload.split(":")[-1])
+        scenario = repo.db.get(Scenario, scenario_id)
+        name = scenario.title if scenario else f"#{scenario_id}"
+        await _edit(
+            f"Удалить сценарий «{name}»?",
+            admin_confirm_delete_keyboard(f"admin:scenario_delete_yes:{scenario_id}", f"admin:scenario_view:{scenario_id}"),
+        )
+        return
+
+    if cb_payload.startswith("admin:scenario_delete_yes:"):
+        scenario_id = int(cb_payload.split(":")[-1])
         try:
             scenario = repo.db.get(Scenario, scenario_id)
             if scenario:
                 repo.db.delete(scenario)
                 repo.db.commit()
             scenarios = repo.list_scenarios()
-            await _edit("Сценарий удалён.", admin_scenarios_keyboard(scenarios))
+            await _edit("✅ Сценарий удалён.", admin_scenarios_keyboard(scenarios))
         except Exception as e:
             await _edit(f"Ошибка удаления: {e}")
         return
@@ -588,10 +623,21 @@ async def _handle_admin_callback(
 
     if cb_payload.startswith("admin:channel_delete:"):
         channel_id = int(cb_payload.split(":")[-1])
+        from app.db.models import RequiredChannel as _RC
+        ch = repo.db.get(_RC, channel_id)
+        name = ch.title if ch else f"#{channel_id}"
+        await _edit(
+            f"Удалить канал «{name}»?",
+            admin_confirm_delete_keyboard(f"admin:channel_delete_yes:{channel_id}", "admin:channels"),
+        )
+        return
+
+    if cb_payload.startswith("admin:channel_delete_yes:"):
+        channel_id = int(cb_payload.split(":")[-1])
         try:
             repo.delete_required_channel(channel_id)
             channels = repo.list_required_channels()
-            await _edit("Канал удалён.", admin_channels_keyboard(channels))
+            await _edit("✅ Канал удалён.", admin_channels_keyboard(channels))
         except Exception as e:
             await _edit(f"Ошибка удаления: {e}")
         return

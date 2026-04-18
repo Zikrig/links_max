@@ -97,6 +97,13 @@ def admin_export_offers_keyboard(offers: list, platform_id: int) -> list:
     return rows
 
 
+def admin_confirm_delete_keyboard(confirm_payload: str, cancel_payload: str) -> list:
+    return [
+        [_btn("✅ Да", confirm_payload)],
+        [_btn("🔙 Отмена", cancel_payload)],
+    ]
+
+
 def build_keyboard_attachment(buttons: list) -> dict:
     return {
         "type": "inline_keyboard",
