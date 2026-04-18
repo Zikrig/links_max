@@ -5,6 +5,10 @@ def _btn(text: str, payload: str) -> dict:
     return {"type": "callback", "text": text, "payload": payload}
 
 
+def _btn_link(text: str, url: str) -> dict:
+    return {"type": "link", "text": text, "url": url}
+
+
 def _nav_row(page: int, total: int, prev_payload: str, next_payload: str) -> list | None:
     """Ряд кнопок «◀ Назад» / «▶ Далее» для пагинации, или None если не нужен."""
     nav = []
@@ -28,12 +32,16 @@ def admin_main_keyboard() -> list:
     ]
 
 
-def admin_replicas_menu_keyboard() -> list:
-    return [
+def admin_replicas_menu_keyboard(policy_url: str | None = None) -> list:
+    rows = [
         [_btn("👤 Для незнакомцев", "admin:replica_edit:stranger")],
         [_btn("⏱ После акции (через 5 мин)", "admin:replica_edit:after")],
-        [_btn("🔙 Назад", "admin:main")],
     ]
+    u = (policy_url or "").strip()
+    if u:
+        rows.append([_btn_link("📄 Правила обработки данных", u)])
+    rows.append([_btn("🔙 Назад", "admin:main")])
+    return rows
 
 
 def admin_replica_cancel_keyboard() -> list:

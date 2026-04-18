@@ -728,7 +728,7 @@ async def _handle_admin_fsm_text(
         rs = repo.get_replica_settings()
         await _reply(
             f"✅ Сохранено.\n\nТекущий текст «Для незнакомцев»:\n{rs.stranger_text}",
-            admin_replicas_menu_keyboard(),
+            admin_replicas_menu_keyboard((_get_cached_settings().personal_data_policy_url or "").strip() or None),
         )
         return True
 
@@ -741,7 +741,7 @@ async def _handle_admin_fsm_text(
         rs = repo.get_replica_settings()
         await _reply(
             f"✅ Сохранено.\n\nТекущий текст «После акции»:\n{rs.after_link_text}",
-            admin_replicas_menu_keyboard(),
+            admin_replicas_menu_keyboard((_get_cached_settings().personal_data_policy_url or "").strip() or None),
         )
         return True
 
@@ -985,13 +985,20 @@ async def _handle_admin_callback(
         rs = repo.get_replica_settings()
         s1 = _short_replica_preview(rs.stranger_text, DEFAULT_REPLICA_STRANGER)
         s2 = _short_replica_preview(rs.after_link_text, DEFAULT_REPLICA_AFTER_LINK)
+        policy_url = (_get_cached_settings().personal_data_policy_url or "").strip()
+        policy_block = (
+            f"\n\n📄 Правила обработки данных (как при согласии, из .env):\n{policy_url}"
+            if policy_url
+            else "\n\n📄 Правила: не заданы (PERSONAL_DATA_POLICY_URL в .env)."
+        )
         await _edit(
             "💬 Управление репликами\n\n"
             "К обоим сообщениям добавляются кнопки последних 10 офферов "
             "(по дате создания карточки; ссылка — на сценарий оффера).\n\n"
             f"👤 Для незнакомцев (вход без кода в ссылке):\n{s1}\n\n"
-            f"⏱ После акции (через 5 мин после выдачи ссылки на карту):\n{s2}",
-            admin_replicas_menu_keyboard(),
+            f"⏱ После акции (через 5 мин после выдачи ссылки на карту):\n{s2}"
+            f"{policy_block}",
+            admin_replicas_menu_keyboard(policy_url if policy_url else None),
         )
         return
 
