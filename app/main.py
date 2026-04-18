@@ -84,12 +84,12 @@ def _run_migrations() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings = get_settings()
-    now_local = datetime.now(ZoneInfo(settings.tz))
+    now_local = datetime.now(ZoneInfo(settings.timezone))
     now_utc = now_local.astimezone(ZoneInfo("UTC"))
     logger.info(
         "Время на сервере при старте: %s (%s), %s UTC",
         now_local.strftime("%Y-%m-%d %H:%M:%S"),
-        settings.tz,
+        settings.timezone,
         now_utc.strftime("%Y-%m-%d %H:%M:%S"),
     )
 

@@ -2,7 +2,7 @@ from functools import lru_cache
 from typing import Annotated, Set
 from urllib.parse import urlparse
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -16,7 +16,13 @@ class Settings(BaseSettings):
     webhook_secret: str
     admin_user_ids: Annotated[Set[int], NoDecode] = set()
     sqlite_path: str = "/data/max_bot.sqlite3"
-    tz: str = "Europe/Moscow"
+    # Не называть поле `tz`: в pydantic-settings оно мапится на env `TZ`, и в Docker
+    # часто TZ=UTC — тогда Москва затирается и время «отстаёт» на 3 часа.
+    # Задаётся через TIMEZONE или APP_TZ в .env (не через системный TZ).
+    timezone: str = Field(
+        default="Europe/Moscow",
+        validation_alias=AliasChoices("TIMEZONE", "APP_TZ"),
+    )
     personal_data_policy_url: str
     bot_username: str = ""
 
