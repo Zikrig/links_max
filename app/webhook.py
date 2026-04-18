@@ -297,11 +297,15 @@ async def _handle_admin_fsm_text(
             await api.send_message(user_id, "chat_id должен быть числом. Попробуйте ещё раз:")
             return True
         fsm.set_state(user_id, "channel_add_link", st.data | {"chat_id": chat_id})
-        await api.send_message(user_id, "Введите ссылку-приглашение в канал\n(или напишите «-» чтобы пропустить):")
+        await api.send_message_with_keyboard(
+            user_id,
+            "Введите ссылку-приглашение в канал:",
+            [[{"type": "callback", "text": "⏭ Пропустить", "payload": "admin:channel_link_skip"}]],
+        )
         return True
 
     if state == "channel_add_link":
-        invite_link = None if text == "-" else text
+        invite_link = None if not text else text
         data = st.data
         fsm.clear_state(user_id)
         try:
@@ -317,17 +321,8 @@ async def _handle_admin_fsm_text(
         return True
 
     if state == "scenario_add_title":
-        fsm.set_state(user_id, "scenario_add_description", st.data | {"title": text})
-        await api.send_message(user_id, "Введите описание акции (текст, который увидит подписчик):")
-        return True
-
-    if state == "scenario_add_description":
-        fsm.set_state(user_id, "scenario_add_image", st.data | {"description": text})
-        await api.send_message(user_id, "Введите ссылку на картинку акции\n(или «-» чтобы пропустить):")
-        return True
-
-    if state == "scenario_add_image":
-        image_url = None if text == "-" else text
+        if not text:
+            return True
         data = st.data
         fsm.clear_state(user_id)
         try:
@@ -335,9 +330,7 @@ async def _handle_admin_fsm_text(
             scenario = repo.create_scenario(
                 offer_id=data["offer_id"],
                 code=code,
-                title=data["title"],
-                description=data.get("description"),
-                image_url=image_url,
+                title=text,
             )
             settings = _get_cached_settings()
             if settings.bot_username:
@@ -345,10 +338,11 @@ async def _handle_admin_fsm_text(
             else:
                 deep_link = f"https://max.ru/start?start={scenario.code}"
             repo.create_or_update_bot_link(scenario.id, deep_link)
-            scenarios = repo.list_scenarios()
+            channels = repo.list_scenario_channels(scenario.id)
+            back = f"admin:offer_view:{data['offer_id']}" if data.get("offer_id") else "admin:scenarios"
             await _reply(
-                f"✅ Сценарий «{data['title']}» создан.\n\nКод: {scenario.code}\nСсылка: {deep_link}",
-                admin_scenarios_keyboard(scenarios),
+                f"✅ Сценарий «{text}» создан. Настройте его:",
+                admin_scenario_settings_keyboard(scenario, channels, back_payload=back),
             )
         except Exception as e:
             await api.send_message(user_id, f"Ошибка создания сценария: {e}")
@@ -447,9 +441,10 @@ async def _handle_admin_fsm_text(
             "_pending_chat_id": chat_id,
             "_pending_title": detail,
         })
-        await api.send_message(
+        await api.send_message_with_keyboard(
             user_id,
-            f"Канал «{detail}» найден. ✅\n\nВведите ссылку-приглашение для канала\n(или «-» пропустить):"
+            f"Канал «{detail}» найден. ✅\n\nВведите ссылку-приглашение для канала:",
+            [[{"type": "callback", "text": "⏭ Пропустить", "payload": "admin:scenario_ch_link_skip"}]],
         )
         return True
 
@@ -922,6 +917,42 @@ async def _handle_admin_callback(
     if cb_payload == "admin:channel_add":
         fsm.set_state(user_id, "channel_add_title")
         await _edit_then_ask("Добавление канала:", "Введите название канала:")
+        return
+
+    if cb_payload == "admin:channel_link_skip":
+        st = fsm.get_state(user_id)
+        if st and st.state == "channel_add_link":
+            data = st.data
+            fsm.clear_state(user_id)
+            try:
+                repo.add_required_channel(
+                    title=data["title"],
+                    chat_id=data["chat_id"],
+                    invite_link=None,
+                )
+                channels = repo.list_required_channels()
+                await _edit(f"✅ Канал «{data['title']}» добавлен.", admin_channels_keyboard(channels))
+            except Exception as e:
+                await _edit(f"Ошибка добавления канала: {e}")
+        return
+
+    if cb_payload == "admin:scenario_ch_link_skip":
+        st = fsm.get_state(user_id)
+        if st and st.state == "scenario_channel_add":
+            data = st.data
+            scenario_id = int(data.get("scenario_id", 0))
+            fsm.clear_state(user_id)
+            repo.add_scenario_channel(
+                scenario_id=scenario_id,
+                chat_id=data["_pending_chat_id"],
+                title=data["_pending_title"],
+                invite_link=None,
+            )
+            channels = repo.list_scenario_channels(scenario_id)
+            await _edit(
+                f"✅ Канал «{data['_pending_title']}» добавлен.",
+                admin_scenario_channels_keyboard(scenario_id, channels),
+            )
         return
 
     if cb_payload.startswith("admin:channel_delete:"):
