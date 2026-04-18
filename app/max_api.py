@@ -144,6 +144,17 @@ class MaxApiClient:
         response = await self._request("POST", "/messages", params=params, json=payload)
         response.raise_for_status()
 
+    async def edit_message(self, message_id: str, text: str, buttons: list | None = None) -> None:
+        """Редактировать существующее сообщение. buttons=None — убрать клавиатуру, buttons=[] — тоже убрать."""
+        body: dict = {"text": text}
+        if buttons:
+            body["attachments"] = [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]
+        else:
+            body["attachments"] = []
+        response = await self._request("PUT", "/messages", params={"message_id": message_id}, json=body)
+        if response.status_code not in (200, 204):
+            logger.warning("edit_message failed %s: %s", response.status_code, response.text[:200])
+
     async def answer_callback(self, callback_id: str, notification: str = " ") -> None:
         """Подтвердить callback без изменения сообщения (безопасный ack из MAX_README)."""
         response = await self._request(
