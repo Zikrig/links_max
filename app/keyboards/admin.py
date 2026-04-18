@@ -21,7 +21,7 @@ def admin_main_keyboard() -> list:
         [_btn("🎯 Офферы", "admin:offers")],
         [_btn("📝 Сценарии", "admin:scenarios")],
         [_btn("🔗 Ссылки на бот", "admin:bot_links")],
-        [_btn("📢 Каналы подписки", "admin:channels")],
+        # [_btn("📢 Каналы подписки", "admin:channels")],
         [_btn("📊 Экспорт", "admin:export")],
         [_btn("📣 Рассылка", "admin:broadcast")],
     ]
@@ -204,3 +204,36 @@ def build_keyboard_attachment(buttons: list) -> dict:
         "type": "inline_keyboard",
         "payload": {"buttons": buttons},
     }
+
+
+def admin_broadcast_entry_keyboard() -> list:
+    return [
+        [_btn("✉️ Создать рассылку", "admin:broadcast_new")],
+        [_btn("🔙 Назад", "admin:main")],
+    ]
+
+
+def admin_broadcast_skip_image_keyboard() -> list:
+    return [
+        [_btn("⏭ Без картинки", "admin:broadcast_skip_image")],
+        [_btn("🔙 Отмена", "admin:broadcast_cancel")],
+    ]
+
+
+def admin_broadcast_default_button_keyboard() -> list:
+    return [
+        [_btn("📌 Текст по умолчанию", "admin:broadcast_default_btn")],
+        [_btn("🔙 Отмена", "admin:broadcast_cancel")],
+    ]
+
+
+def admin_broadcast_preview_keyboard() -> list:
+    return [
+        [_btn("▶ Отправить сейчас", "admin:broadcast_send_now")],
+        [_btn("📅 Отправить позже", "admin:broadcast_send_later")],
+        [_btn("🔙 Отмена", "admin:broadcast_cancel")],
+    ]
+
+
+def admin_broadcast_schedule_cancel_keyboard() -> list:
+    return [[_btn("🔙 Отмена", "admin:broadcast_cancel")]]

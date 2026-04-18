@@ -172,6 +172,117 @@ class MaxApiClient:
         response = await self._request("POST", "/messages", params=params, json=payload)
         response.raise_for_status()
 
+    async def upload_image(self, file_bytes: bytes, filename: str) -> str | None:
+        """Загрузить изображение (POST /uploads?type=image), вернуть token для вложения."""
+        try:
+            upload_resp = await self._request("POST", "/uploads", params={"type": "image"})
+            upload_resp.raise_for_status()
+            meta = upload_resp.json()
+            if not isinstance(meta, dict):
+                logger.warning("POST /uploads image: не JSON-объект: %s", (upload_resp.text or "")[:500])
+                return None
+            upload_url = meta.get("url")
+            if not upload_url:
+                logger.warning("POST /uploads image: нет url: %s", (upload_resp.text or "")[:800])
+                return None
+            auth = self.client.headers.get("Authorization") or f"Bearer {self._bot_token}"
+            up_resp = await self.client.post(
+                upload_url,
+                files={"data": (filename, file_bytes)},
+                headers={"Authorization": auth},
+            )
+            if up_resp.status_code >= 400:
+                logger.warning(
+                    "Image upload POST failed %s: %s",
+                    up_resp.status_code,
+                    (up_resp.text or "")[:800],
+                )
+                return None
+            try:
+                body = up_resp.json()
+            except Exception as exc:
+                logger.warning("Image upload response not JSON: %s", exc)
+                return None
+            if not isinstance(body, dict):
+                return None
+            token = body.get("token")
+            if not token:
+                logger.warning("Image upload OK but no token: %s", (up_resp.text or "")[:800])
+            return token
+        except Exception as exc:
+            logger.warning("Image upload failed: %s", exc)
+            return None
+
+    async def send_broadcast_message(
+        self,
+        user_id: int,
+        text: str,
+        button_text: str,
+        button_url: str,
+        image_url: str | None = None,
+    ) -> None:
+        """
+        Рассылка: текст + кнопка-ссылка; при image_url — картинка через token после загрузки по URL.
+        При ошибке комбинации — fallback: текст с URL картинки + описание + кнопка.
+        """
+        params = {"user_id": user_id} if user_id > 0 else {"chat_id": user_id}
+        kb = {
+            "type": "inline_keyboard",
+            "payload": {
+                "buttons": [[{"type": "link", "text": button_text, "url": button_url}]]
+            },
+        }
+
+        if not (image_url or "").strip():
+            await self.send_message_with_button(user_id, text, button_text, button_url)
+            return
+
+        raw_url = image_url.strip()
+        token: str | None = None
+        filename = "image.jpg"
+        try:
+            path_part = raw_url.split("?", 1)[0].rstrip("/").split("/")[-1]
+            if path_part and "." in path_part:
+                filename = path_part[-120:]
+        except Exception:
+            pass
+        try:
+            img_resp = await self.client.get(raw_url, follow_redirects=True, timeout=45.0)
+            if img_resp.status_code == 200 and img_resp.content:
+                token = await self.upload_image(img_resp.content, filename)
+        except Exception as exc:
+            logger.warning("broadcast: не удалось скачать картинку %s: %s", raw_url, exc)
+
+        if token:
+            body_text = text.strip() or " "
+            payload: dict = {
+                "text": body_text,
+                "attachments": [
+                    {"type": "image", "payload": {"token": token}},
+                    kb,
+                ],
+            }
+            for attempt in range(5):
+                response = await self._request("POST", "/messages", params=params, json=payload)
+                if response.status_code < 400:
+                    response.raise_for_status()
+                    return
+                err_body = (response.text or "")[:800]
+                if response.status_code == 400 and "attachment.not.ready" in err_body:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                logger.warning(
+                    "POST /messages broadcast (image+keyboard) failed %s: %s",
+                    response.status_code,
+                    err_body,
+                )
+                break
+
+        combined = f"{raw_url}\n\n{text}".strip()
+        if len(combined) > 4000:
+            combined = combined[:3997] + "..."
+        await self.send_message_with_button(user_id, combined, button_text, button_url)
+
     async def get_me(self) -> dict:
         """Получить информацию о боте (user_id и др.)."""
         try:
@@ -385,19 +496,42 @@ class MaxApiClient:
 
     async def upload_file(self, file_bytes: bytes, filename: str) -> str | None:
         """Загрузить файл в MAX, вернуть token для использования в сообщении."""
+        # См. https://dev.max.ru/docs-api/methods/POST/uploads — загрузка по url:
+        # POST multipart/form-data, поле data, заголовок Authorization как у API.
         try:
             upload_resp = await self._request("POST", "/uploads", params={"type": "file"})
             upload_resp.raise_for_status()
-            upload_url = upload_resp.json().get("url")
-            if not upload_url:
+            meta = upload_resp.json()
+            if not isinstance(meta, dict):
+                logger.warning("POST /uploads: не JSON-объект: %s", (upload_resp.text or "")[:500])
                 return None
-            put_resp = await self.client.put(
+            upload_url = meta.get("url")
+            if not upload_url:
+                logger.warning("POST /uploads: нет url в ответе: %s", (upload_resp.text or "")[:800])
+                return None
+            auth = self.client.headers.get("Authorization") or f"Bearer {self._bot_token}"
+            up_resp = await self.client.post(
                 upload_url,
-                content=file_bytes,
-                headers={"Content-Type": "application/octet-stream", "Content-Disposition": f'attachment; filename="{filename}"'},
+                files={"data": (filename, file_bytes)},
+                headers={"Authorization": auth},
             )
-            put_resp.raise_for_status()
-            token = put_resp.json().get("token")
+            if up_resp.status_code >= 400:
+                logger.warning(
+                    "Upload POST failed %s: %s",
+                    up_resp.status_code,
+                    (up_resp.text or "")[:800],
+                )
+                return None
+            try:
+                body = up_resp.json()
+            except Exception as exc:
+                logger.warning("Upload response not JSON: %s", exc)
+                return None
+            if not isinstance(body, dict):
+                return None
+            token = body.get("token")
+            if not token:
+                logger.warning("Upload OK but no token in body: %s", (up_resp.text or "")[:800])
             return token
         except Exception as exc:
             logger.warning("File upload failed: %s", exc)

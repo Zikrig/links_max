@@ -188,6 +188,43 @@ class Repo:
         )
         return list(self.db.scalars(stmt))
 
+    def list_distinct_lead_user_ids(self) -> list[int]:
+        """Уникальные user_id из лидов — аудитория рассылки."""
+        stmt = select(models.Lead.user_id).distinct()
+        return list(self.db.scalars(stmt))
+
+    def get_broadcast(self, broadcast_id: int) -> models.Broadcast | None:
+        return self.db.get(models.Broadcast, broadcast_id)
+
+    def list_scheduled_broadcasts_with_send_at(self) -> list[models.Broadcast]:
+        """Все отложенные по send_at (для восстановления планировщика после рестарта)."""
+        stmt = (
+            select(models.Broadcast)
+            .where(
+                models.Broadcast.status == "scheduled",
+                models.Broadcast.send_at.isnot(None),
+            )
+            .order_by(models.Broadcast.send_at.asc())
+        )
+        return list(self.db.scalars(stmt))
+
+    def try_claim_broadcast_for_sending(self, broadcast_id: int) -> models.Broadcast | None:
+        """Атомарно перевести scheduled → sending; вернуть запись или None если не получилось."""
+        from sqlalchemy import update
+
+        res = self.db.execute(
+            update(models.Broadcast)
+            .where(
+                models.Broadcast.id == broadcast_id,
+                models.Broadcast.status == "scheduled",
+            )
+            .values(status="sending")
+        )
+        self.db.commit()
+        if res.rowcount == 0:
+            return None
+        return self.get_broadcast(broadcast_id)
+
     def add_required_channel(self, title: str, chat_id: int, invite_link: str | None) -> models.RequiredChannel:
         channel = models.RequiredChannel(title=title, chat_id=chat_id, invite_link=invite_link)
         self.db.add(channel)
@@ -212,6 +249,7 @@ class Repo:
         button_text: str = "Перейти к акции",
         image_url: str | None = None,
         send_at: datetime | None = None,
+        status: str = "scheduled",
     ) -> models.Broadcast:
         item = models.Broadcast(
             title=title,
@@ -220,12 +258,18 @@ class Repo:
             button_url=button_url,
             image_url=image_url,
             send_at=send_at,
-            status="scheduled",
+            status=status,
         )
         self.db.add(item)
         self.db.commit()
         self.db.refresh(item)
         return item
+
+    def update_broadcast_status(self, broadcast_id: int, status: str) -> None:
+        item = self.db.get(models.Broadcast, broadcast_id)
+        if item:
+            item.status = status
+            self.db.commit()
 
     def mark_broadcast_sent(self, broadcast_id: int) -> None:
         item = self.db.get(models.Broadcast, broadcast_id)

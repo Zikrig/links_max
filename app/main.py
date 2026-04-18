@@ -9,6 +9,7 @@ from app.db.database import Base, engine
 from app.max_api import MaxApiClient
 from app.routers.admin import router as admin_router
 from app.routers.user import router as user_router
+from app.services.broadcast_runner import get_scheduler, reschedule_pending_broadcasts
 from app.webhook import router as webhook_router
 
 logger = logging.getLogger(__name__)
@@ -103,9 +104,21 @@ async def lifespan(_: FastAPI):
         logger.info("Webhook subscribed: %s", webhook_url)
     except Exception as exc:
         logger.error("Webhook subscribe failed: %s", exc)
+
+    scheduler = get_scheduler()
+    scheduler.start()
+    try:
+        await reschedule_pending_broadcasts()
+    except Exception as exc:
+        logger.error("Broadcast scheduler recovery failed: %s", exc)
+
     try:
         yield
     finally:
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception as exc:
+            logger.warning("Scheduler shutdown: %s", exc)
         if subscribed and webhook_url:
             try:
                 await max_api.unsubscribe_webhook(webhook_url)

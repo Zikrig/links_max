@@ -2,6 +2,8 @@ import logging
 import secrets as _secrets
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -14,6 +16,11 @@ from app.db.models import Offer, Scenario
 from app.db.repo import Repo
 from app.keyboards.admin import (
     admin_bot_links_keyboard,
+    admin_broadcast_default_button_keyboard,
+    admin_broadcast_entry_keyboard,
+    admin_broadcast_preview_keyboard,
+    admin_broadcast_schedule_cancel_keyboard,
+    admin_broadcast_skip_image_keyboard,
     admin_channels_keyboard,
     admin_confirm_delete_keyboard,
     admin_export_offers_keyboard,
@@ -36,6 +43,7 @@ from app.keyboards.user import (
     user_subscribe_keyboard,
 )
 from app.max_api import MaxApiClient, RateLimitError
+from app.services.broadcast_runner import launch_broadcast_now, schedule_broadcast_job
 from app.services.export_service import ExportService
 from app.services.link_builder import build_offer_link, offer_produces_valid_links
 
@@ -61,6 +69,38 @@ def _is_duplicate_callback(callback_id: str) -> bool:
 
 def _get_cached_settings() -> Settings:
     return get_settings()
+
+
+def _format_broadcast_preview(data: dict) -> str:
+    lines = ["📣 Превью рассылки", "", f"Заголовок: {data.get('title', '')}"]
+    img = data.get("image_url")
+    lines.append(f"Картинка: {img}" if img else "Картинка: —")
+    lines.extend(["", data.get("text", ""), ""])
+    lines.append(f"Кнопка: «{data.get('button_text', '')}» → {data.get('button_url', '')}")
+    return "\n".join(lines)
+
+
+def _parse_broadcast_schedule(text: str) -> datetime | None:
+    t = text.strip()
+    if not t:
+        return None
+    msk = ZoneInfo("Europe/Moscow")
+    utc = ZoneInfo("UTC")
+    try:
+        dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+    except ValueError:
+        dt = None
+    else:
+        if dt.tzinfo is not None:
+            return dt.astimezone(utc).replace(tzinfo=None)
+        return dt.replace(tzinfo=msk).astimezone(utc).replace(tzinfo=None)
+    for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y %H:%M:%S"):
+        try:
+            parsed = datetime.strptime(t, fmt).replace(tzinfo=msk)
+            return parsed.astimezone(utc).replace(tzinfo=None)
+        except ValueError:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +503,110 @@ async def _handle_admin_fsm_text(
         )
         channels = repo.list_scenario_channels(scenario_id)
         await _reply(f"✅ Канал «{ch_title}» добавлен.", admin_scenario_channels_keyboard(scenario_id, channels))
+        return True
+
+    # --- Рассылка (мастер) ---
+
+    if state == "broadcast_w_title":
+        if not text.strip():
+            await api.send_message(user_id, "Заголовок не может быть пустым.")
+            return True
+        fsm.set_state(user_id, "broadcast_w_image", {"title": text.strip()})
+        await api.send_message_with_keyboard(
+            user_id,
+            "Пришлите URL картинки (https://…) или нажмите «Без картинки».",
+            admin_broadcast_skip_image_keyboard(),
+        )
+        return True
+
+    if state == "broadcast_w_image":
+        if not text.strip():
+            await api.send_message(user_id, "Пришлите URL картинки или нажмите «Без картинки».")
+            return True
+        url = text.strip()
+        if not url.startswith("http"):
+            await api.send_message(user_id, "Укажите полный URL, начиная с https://")
+            return True
+        fsm.set_state(user_id, "broadcast_w_text", st.data | {"image_url": url})
+        await api.send_message(
+            user_id,
+            "Введите текст описания (основной текст уведомления для получателей):",
+        )
+        return True
+
+    if state == "broadcast_w_text":
+        if not text.strip():
+            await api.send_message(user_id, "Текст не может быть пустым.")
+            return True
+        fsm.set_state(user_id, "broadcast_w_button_text", st.data | {"text": text.strip()})
+        await api.send_message_with_keyboard(
+            user_id,
+            "Введите текст на кнопке или выберите значение по умолчанию:",
+            admin_broadcast_default_button_keyboard(),
+        )
+        return True
+
+    if state == "broadcast_w_button_text":
+        if not text.strip():
+            await api.send_message(user_id, 'Введите текст кнопки или нажмите «Текст по умолчанию».')
+            return True
+        fsm.set_state(user_id, "broadcast_w_button_url", st.data | {"button_text": text.strip()})
+        await api.send_message(user_id, "Введите URL для кнопки (https://...):")
+        return True
+
+    if state == "broadcast_w_button_url":
+        if not text.strip():
+            await api.send_message(user_id, "URL не может быть пустым.")
+            return True
+        url = text.strip()
+        if not url.startswith("http"):
+            await api.send_message(user_id, "Укажите полный URL (https://...).")
+            return True
+        data = st.data | {"button_url": url}
+        fsm.set_state(user_id, "broadcast_preview", data)
+        preview = _format_broadcast_preview(data)
+        await api.send_message_with_keyboard(user_id, preview, admin_broadcast_preview_keyboard())
+        return True
+
+    if state == "broadcast_w_schedule":
+        when = _parse_broadcast_schedule(text)
+        if not when:
+            await api.send_message(
+                user_id,
+                "Не удалось разобрать дату. Пример (московское время): 18.04.2026 15:30",
+            )
+            return True
+        if when <= datetime.utcnow():
+            await api.send_message(user_id, "Укажите дату и время в будущем.")
+            return True
+        data = st.data
+        fsm.clear_state(user_id)
+        try:
+            bc = repo.create_broadcast(
+                title=data["title"],
+                text=data["text"],
+                button_url=data["button_url"],
+                button_text=data.get("button_text", "Перейти к акции"),
+                image_url=data.get("image_url"),
+                send_at=when,
+            )
+            schedule_broadcast_job(bc.id, bc.send_at)
+            msk = ZoneInfo("Europe/Moscow")
+            local = when.replace(tzinfo=ZoneInfo("UTC")).astimezone(msk).strftime("%d.%m.%Y %H:%M")
+            await api.send_message_with_keyboard(
+                user_id,
+                f"✅ Рассылка «{bc.title}» запланирована на {local} (МСК).",
+                admin_main_keyboard(),
+            )
+        except Exception as e:
+            await api.send_message(user_id, f"Ошибка: {e}")
+        return True
+
+    if state == "broadcast_preview":
+        await api.send_message(
+            user_id,
+            "Используйте кнопки под превью: «Отправить сейчас», «Отправить позже» или «Отмена».",
+        )
         return True
 
     return False
@@ -1012,7 +1156,90 @@ async def _handle_admin_callback(
     # --- Рассылка ---
     if cb_payload == "admin:broadcast":
         fsm.clear_state(user_id)
-        await _edit("Рассылка — функция в разработке.")
+        await _edit(
+            "Рассылка всем пользователям из базы лидов:\n"
+            "картинка (по желанию), описание, кнопка со ссылкой.\n"
+            "Можно отправить сразу или запланировать.",
+            admin_broadcast_entry_keyboard(),
+        )
+        return
+
+    if cb_payload == "admin:broadcast_new":
+        fsm.set_state(user_id, "broadcast_w_title", {})
+        await _edit_then_ask(
+            "Новая рассылка",
+            "Введите короткий заголовок (для истории):",
+        )
+        return
+
+    if cb_payload == "admin:broadcast_skip_image":
+        st = fsm.get_state(user_id)
+        if not st or st.state != "broadcast_w_image":
+            await _ack()
+            return
+        fsm.set_state(user_id, "broadcast_w_text", st.data | {"image_url": None})
+        await _edit_then_ask(
+            "Без картинки",
+            "Введите текст описания (основной текст уведомления для получателей):",
+        )
+        return
+
+    if cb_payload == "admin:broadcast_default_btn":
+        st = fsm.get_state(user_id)
+        if not st or st.state != "broadcast_w_button_text":
+            await _ack()
+            return
+        fsm.set_state(user_id, "broadcast_w_button_url", st.data | {"button_text": "Перейти к акции"})
+        await _edit_then_ask(
+            'Текст кнопки: «Перейти к акции»',
+            "Введите URL для кнопки (https://...):",
+        )
+        return
+
+    if cb_payload == "admin:broadcast_send_now":
+        st = fsm.get_state(user_id)
+        if not st or st.state != "broadcast_preview":
+            await _ack()
+            return
+        data = st.data
+        fsm.clear_state(user_id)
+        try:
+            bc = repo.create_broadcast(
+                title=data["title"],
+                text=data["text"],
+                button_url=data["button_url"],
+                button_text=data.get("button_text", "Перейти к акции"),
+                image_url=data.get("image_url"),
+                send_at=None,
+            )
+            launch_broadcast_now(bc.id)
+            await _edit(
+                f"✅ Рассылка «{bc.title}» запущена.",
+                admin_main_keyboard(),
+            )
+        except Exception as e:
+            await api.send_message(user_id, f"Ошибка: {e}")
+            await _ack()
+        return
+
+    if cb_payload == "admin:broadcast_send_later":
+        st = fsm.get_state(user_id)
+        if not st or st.state != "broadcast_preview":
+            await _ack()
+            return
+        fsm.set_state(user_id, "broadcast_w_schedule", st.data)
+        await _edit(
+            "Запланировать отправку.\n"
+            "Укажите дату и время в одном сообщении (московское время),\n"
+            "например: 18.04.2026 15:30\n"
+            "или дату в формате ISO с часовым поясом.",
+            admin_broadcast_schedule_cancel_keyboard(),
+        )
+        return
+
+    if cb_payload == "admin:broadcast_cancel":
+        fsm.clear_state(user_id)
+        await _edit("Админ-меню:", admin_main_keyboard())
         return
 
     logger.warning("Неизвестный admin callback: %r", cb_payload)
