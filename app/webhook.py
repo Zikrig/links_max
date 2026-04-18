@@ -294,7 +294,7 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
             await api.send_message_with_keyboard(
                 user_id,
                 f"✅ Оффер «{data['name']}» добавлен.\n\nПример ссылки:\n{example_link}{sep}{subid_param}=0001",
-                admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}"),
+                admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}", platform_id=platform_id),
             )
         except Exception as e:
             await api.send_message(user_id, f"Ошибка создания оффера: {e}")
@@ -421,7 +421,7 @@ async def _handle_admin_callback(
         offers = repo.list_offers_for_platform(platform_id)
         text = "Офферы платформы:" if offers else "Офферов пока нет."
         await api.send_message_with_keyboard(
-            user_id, text, admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}")
+            user_id, text, admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}", platform_id=platform_id)
         )
         return
 
@@ -441,6 +441,13 @@ async def _handle_admin_callback(
         offers = repo.list_offers()
         text = "Все офферы:" if offers else "Офферов пока нет."
         await api.send_message_with_keyboard(user_id, text, admin_offers_keyboard(offers))
+        return
+
+    if cb_payload.startswith("admin:offer_add:"):
+        # Добавление оффера с уже известной платформой (из меню платформы)
+        platform_id = int(cb_payload.split(":")[-1])
+        fsm.set_state(user_id, "offer_add_name", {"platform_id": platform_id})
+        await api.send_message(user_id, "Введите название оффера (карты):")
         return
 
     if cb_payload == "admin:offer_add":
@@ -484,7 +491,7 @@ async def _handle_admin_callback(
                 offers = repo.list_offers_for_platform(platform_id)
                 await api.send_message_with_keyboard(
                     user_id, "Оффер удалён.",
-                    admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}")
+                    admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}", platform_id=platform_id)
                 )
             else:
                 await api.send_message(user_id, "Оффер удалён.")

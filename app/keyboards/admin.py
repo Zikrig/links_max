@@ -29,9 +29,10 @@ def admin_platform_view_keyboard(platform_id: int) -> list:
     ]
 
 
-def admin_offers_keyboard(offers: list, back_payload: str = "admin:main") -> list:
+def admin_offers_keyboard(offers: list, back_payload: str = "admin:main", platform_id: int | None = None) -> list:
     rows = [[_btn(o.name, f"admin:offer_view:{o.id}")] for o in offers]
-    rows.append([_btn("➕ Добавить оффер", "admin:offer_add")])
+    add_payload = f"admin:offer_add:{platform_id}" if platform_id else "admin:offer_add"
+    rows.append([_btn("➕ Добавить оффер", add_payload)])
     rows.append([_btn("🔙 Назад", back_payload)])
     return rows
 
