@@ -1,5 +1,6 @@
 import logging
 import secrets as _secrets
+import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -41,6 +42,22 @@ from app.services.link_builder import build_offer_link
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
+
+# Дедупликация callback_id: защита от повторных webhook от MAX при задержках
+_seen_callbacks: dict[str, float] = {}
+_CALLBACK_TTL = 60.0  # секунд
+
+def _is_duplicate_callback(callback_id: str) -> bool:
+    """Вернуть True если этот callback_id уже обрабатывался недавно."""
+    now = time.monotonic()
+    # Чистим старые записи
+    expired = [k for k, v in _seen_callbacks.items() if now - v > _CALLBACK_TTL]
+    for k in expired:
+        del _seen_callbacks[k]
+    if callback_id in _seen_callbacks:
+        return True
+    _seen_callbacks[callback_id] = now
+    return False
 
 
 def _get_cached_settings() -> Settings:
@@ -979,6 +996,9 @@ async def handle_max_webhook(
 
         # --- Callbacks ---
         if ev.update_type == "message_callback":
+            if ev.callback_id and _is_duplicate_callback(ev.callback_id):
+                logger.info("Duplicate callback_id=%s — skip", ev.callback_id[:20])
+                return Response(status_code=200)
             if ev.text.startswith("user:"):
                 await _handle_user_callback(api, repo, ev.user_id, ev.text, ev.callback_id, ev.message_id, ev.max_name, ev.max_username, settings)
             elif is_admin and ev.text.startswith("admin:"):

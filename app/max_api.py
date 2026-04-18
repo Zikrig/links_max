@@ -28,13 +28,22 @@ class MaxApiClient:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+    async def _request(
+        self, method: str, path: str, *, fast_fail_429: bool = False, **kwargs
+    ) -> httpx.Response:
+        """
+        fast_fail_429=True — при 429 не ждать, сразу вернуть ответ.
+        Используется для edit/ack чтобы webhook возвращал 200 быстро.
+        """
         deadline = time.monotonic() + _RATE_LIMIT_TIMEOUT
         attempt = 0
         while True:
             response = await self.client.request(method, path, **kwargs)
 
             if response.status_code == 429:
+                if fast_fail_429:
+                    logger.warning("429 на %s %s — fast_fail, не ждём", method, path)
+                    return response
                 retry_after = float(response.headers.get("Retry-After", min(2 ** attempt, 60)))
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -196,8 +205,7 @@ class MaxApiClient:
 
     async def edit_message(self, message_id: str, text: str, buttons: list | None = None) -> bool:
         """
-        Редактировать существующее сообщение.
-        buttons=None / [] — убрать клавиатуру.
+        Редактировать существующее сообщение. Fast-fail на 429.
         Возвращает True если успешно, False если нет.
         """
         body: dict = {"text": text}
@@ -206,7 +214,12 @@ class MaxApiClient:
         else:
             body["attachments"] = []
         try:
-            response = await self._request("PUT", "/messages", params={"message_id": message_id}, json=body)
+            response = await self._request(
+                "PUT", "/messages",
+                fast_fail_429=True,
+                params={"message_id": message_id},
+                json=body,
+            )
             if response.status_code in (200, 204):
                 return True
             logger.warning("edit_message failed %s body=%s", response.status_code, response.text[:300])
@@ -216,12 +229,12 @@ class MaxApiClient:
             return False
 
     async def answer_callback(self, callback_id: str, notification: str = " ") -> None:
-        """Подтвердить callback без изменения сообщения."""
+        """Подтвердить callback без изменения сообщения. Fast-fail на 429."""
         try:
             await self._request(
                 "POST", "/answers",
+                fast_fail_429=True,
                 params={"callback_id": callback_id},
-                # Не передаём "message": null — просто уведомление
                 json={"notification": notification},
             )
         except Exception:
