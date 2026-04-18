@@ -293,33 +293,43 @@ async def _handle_admin_fsm_text(
         return True
 
     if state == "channel_add_title":
-        fsm.set_state(user_id, "channel_add_id", st.data | {"title": text})
-        await api.send_message(user_id, "Введите chat_id канала\n(отрицательное число, например: -1001234567890):")
-        return True
-
-    if state == "channel_add_id":
-        try:
-            chat_id = int(text)
-        except ValueError:
-            await api.send_message(user_id, "chat_id должен быть числом. Попробуйте ещё раз:")
+        if not text:
+            await api.send_message(user_id, "Название не может быть пустым.")
             return True
-        fsm.set_state(user_id, "channel_add_link", st.data | {"chat_id": chat_id})
-        await api.send_message_with_keyboard(
+        fsm.set_state(user_id, "channel_add_invite", st.data | {"title": text})
+        await api.send_message(
             user_id,
-            "Введите ссылку-приглашение в канал:",
-            [[{"type": "callback", "text": "⏭ Пропустить", "payload": "admin:channel_link_skip"}]],
+            "Отправьте ссылку-приглашение в канал или публичную ссылку на канал в MAX.\n"
+            "Число (chat_id) вводить не нужно — бот определит канал по ссылке. "
+            "Бот должен быть администратором канала.",
         )
         return True
 
-    if state == "channel_add_link":
-        invite_link = None if not text else text
+    if state == "channel_add_invite":
+        if not text or not text.strip():
+            await api.send_message(user_id, "Пришлите ссылку на канал.")
+            return True
+        link = text.strip()
+        settings_ch = _get_cached_settings()
+        api_ch = MaxApiClient(settings_ch.bot_token)
+        try:
+            ok, chat_id, title_or_err = await api_ch.resolve_chat_from_invite_url(link)
+            if not ok or chat_id is None:
+                await api.send_message(user_id, f"⚠️ {title_or_err}\n\nПопробуйте другую ссылку.")
+                return True
+            ok_adm, adm_detail = await api_ch.check_bot_is_channel_admin(chat_id)
+            if not ok_adm:
+                await api.send_message(user_id, f"⚠️ {adm_detail}")
+                return True
+        finally:
+            await api_ch.close()
         data = st.data
         fsm.clear_state(user_id)
         try:
             repo.add_required_channel(
                 title=data["title"],
-                chat_id=data["chat_id"],
-                invite_link=invite_link,
+                chat_id=chat_id,
+                invite_link=link,
             )
             channels = repo.list_required_channels()
             await _reply(f"✅ Канал «{data['title']}» добавлен.", admin_channels_keyboard(channels))
@@ -420,50 +430,37 @@ async def _handle_admin_fsm_text(
             await api.send_message(user_id, "Сценарий не найден.")
             return True
 
-        try:
-            chat_id = int(text)
-        except ValueError:
-            await api.send_message(user_id, "chat_id должен быть числом (например: -1001234567890).\nПопробуйте ещё раз:")
+        if not text or not text.strip():
+            await api.send_message(user_id, "Пришлите ссылку-приглашение или публичную ссылку на канал.")
             return True
+        link = text.strip()
 
         settings_ch = _get_cached_settings()
         api_ch = MaxApiClient(settings_ch.bot_token)
         try:
-            ok, detail = await api_ch.check_bot_is_channel_admin(chat_id)
+            ok, chat_id, title_or_err = await api_ch.resolve_chat_from_invite_url(link)
+            if not ok or chat_id is None:
+                await api.send_message(user_id, f"⚠️ {title_or_err}\n\nПопробуйте другую ссылку.")
+                return True
+            ok_adm, detail = await api_ch.check_bot_is_channel_admin(chat_id)
+            if not ok_adm:
+                await api.send_message(
+                    user_id,
+                    f"⚠️ {detail}\n\nПришлите другую ссылку или нажмите «Назад».",
+                )
+                return True
         finally:
             await api_ch.close()
 
-        if not ok:
-            await api.send_message(
-                user_id,
-                f"⚠️ {detail}\n\nВведите другой chat_id или нажмите «Назад»:"
-            )
-            return True
-
-        if st.data.get("_invite_step"):
-            invite_link = None if text == "-" else text
-            ch_data = st.data
-            fsm.clear_state(user_id)
-            repo.add_scenario_channel(
-                scenario_id=scenario_id,
-                chat_id=ch_data["_pending_chat_id"],
-                title=ch_data["_pending_title"],
-                invite_link=invite_link,
-            )
-            channels = repo.list_scenario_channels(scenario_id)
-            await _reply(f"✅ Канал «{ch_data['_pending_title']}» добавлен.", admin_scenario_channels_keyboard(scenario_id, channels))
-            return True
-
-        fsm.set_state(user_id, "scenario_channel_add", st.data | {
-            "_invite_step": True,
-            "_pending_chat_id": chat_id,
-            "_pending_title": detail,
-        })
-        await api.send_message_with_keyboard(
-            user_id,
-            f"Канал «{detail}» найден. ✅\n\nВведите ссылку-приглашение для канала:",
-            [[{"type": "callback", "text": "⏭ Пропустить", "payload": "admin:scenario_ch_link_skip"}]],
+        fsm.clear_state(user_id)
+        repo.add_scenario_channel(
+            scenario_id=scenario_id,
+            chat_id=chat_id,
+            title=detail,
+            invite_link=link,
         )
+        channels = repo.list_scenario_channels(scenario_id)
+        await _reply(f"✅ Канал «{detail}» добавлен.", admin_scenario_channels_keyboard(scenario_id, channels))
         return True
 
     return False
@@ -790,8 +787,8 @@ async def _handle_admin_callback(
         fsm.set_state(user_id, "scenario_channel_add", {"scenario_id": scenario_id})
         await _edit_then_ask(
             "Добавление канала:",
-            "Введите chat_id канала (число, например: -1001234567890).\n"
-            "Бот должен быть администратором в этом канале."
+            "Отправьте ссылку-приглашение в канал или публичную ссылку на канал в MAX.\n"
+            "Число (chat_id) вводить не нужно. Бот должен быть администратором канала.",
         )
         return
 
@@ -943,38 +940,14 @@ async def _handle_admin_callback(
 
     if cb_payload == "admin:channel_link_skip":
         st = fsm.get_state(user_id)
-        if st and st.state == "channel_add_link":
-            data = st.data
-            fsm.clear_state(user_id)
-            try:
-                repo.add_required_channel(
-                    title=data["title"],
-                    chat_id=data["chat_id"],
-                    invite_link=None,
-                )
-                channels = repo.list_required_channels()
-                await _edit(f"✅ Канал «{data['title']}» добавлен.", admin_channels_keyboard(channels))
-            except Exception as e:
-                await _edit(f"Ошибка добавления канала: {e}")
+        if st and st.state == "channel_add_invite":
+            await _edit("Нужна ссылка на канал — без неё нельзя добавить канал. Пришлите ссылку сообщением.")
         return
 
     if cb_payload == "admin:scenario_ch_link_skip":
         st = fsm.get_state(user_id)
         if st and st.state == "scenario_channel_add":
-            data = st.data
-            scenario_id = int(data.get("scenario_id", 0))
-            fsm.clear_state(user_id)
-            repo.add_scenario_channel(
-                scenario_id=scenario_id,
-                chat_id=data["_pending_chat_id"],
-                title=data["_pending_title"],
-                invite_link=None,
-            )
-            channels = repo.list_scenario_channels(scenario_id)
-            await _edit(
-                f"✅ Канал «{data['_pending_title']}» добавлен.",
-                admin_scenario_channels_keyboard(scenario_id, channels),
-            )
+            await _edit("Нужна ссылка на канал. Пришлите ссылку сообщением.")
         return
 
     if cb_payload.startswith("admin:channel_delete:"):
