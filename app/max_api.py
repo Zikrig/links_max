@@ -156,6 +156,36 @@ class MaxApiClient:
         response.raise_for_status()
         return response.json().get("message")
 
+    async def send_message_with_image_and_keyboard(
+        self, user_id: int, text: str, image_token: str, buttons: list
+    ) -> None:
+        """Текст + вложение image + inline-клавиатура (картинка не дублируется ссылкой в тексте)."""
+        params = {"user_id": user_id} if user_id > 0 else {"chat_id": user_id}
+        body_text = (text or "").strip() or " "
+        kb = {"type": "inline_keyboard", "payload": {"buttons": buttons}}
+        payload: dict = {
+            "text": body_text,
+            "attachments": [
+                {"type": "image", "payload": {"token": image_token}},
+                kb,
+            ],
+        }
+        for attempt in range(8):
+            response = await self._request("POST", "/messages", params=params, json=payload)
+            if response.status_code < 400:
+                response.raise_for_status()
+                return
+            err_body = (response.text or "")[:800]
+            if response.status_code == 400 and "attachment.not.ready" in err_body and attempt < 7:
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            logger.warning(
+                "POST /messages image+keyboard failed %s: %s",
+                response.status_code,
+                err_body,
+            )
+            response.raise_for_status()
+
     async def send_message_with_button(self, user_id: int, text: str, button_text: str, button_url: str) -> None:
         params = {"user_id": user_id} if user_id > 0 else {"chat_id": user_id}
         payload: dict = {

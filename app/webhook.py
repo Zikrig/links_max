@@ -93,10 +93,8 @@ def _format_broadcast_preview(data: dict) -> str:
     img = data.get("image_url")
     if not img:
         lines.append("Картинка: —")
-    elif str(img).startswith("http://") or str(img).startswith("https://"):
-        lines.append("Картинка: да (будет загружена по ссылке)")
     else:
-        lines.append("Картинка: да (вложение)")
+        lines.append("Картинка: да")
     lines.extend(["", data.get("text", ""), ""])
     btn = data.get("button_text") or _BROADCAST_DEFAULT_BUTTON_TEXT
     lines.append(f"Кнопка: «{btn}» → {data.get('button_url', '')}")
@@ -258,7 +256,7 @@ async def _user_proceed_to_fio_after_checks(
     if not offer_produces_valid_links(scenario.offer):
         await api.send_message(
             user_id,
-            "Ошибка: у оффера не задана основная ссылка. Обратитесь к администратору.",
+            "Ошибка: для оффера не задана основная ссылка. Обратитесь к администратору.",
         )
         return
     await _begin_user_fio_flow(api, user_id, scenario_code)
@@ -581,14 +579,14 @@ async def _handle_admin_fsm_text(
                 image_url = pld["token"]
                 break
 
-        # Если фото не прислали — считаем текст URL-ом
         if image_url is None:
+            if attachments:
+                await api.send_message(user_id, "Не удалось сохранить изображение. Попробуйте отправить другое.")
+                return True
             if not text:
-                if attachments:
-                    # Вложения есть, но URL не распознан — сообщаем о проблеме
-                    await api.send_message(user_id, "⚠️ Не удалось получить URL картинки. Попробуйте отправить URL текстом.")
-                return True  # пустое сообщение без вложений — игнорируем
-            image_url = text
+                return True
+            await api.send_message(user_id, "Отправьте изображение вложением.")
+            return True
 
         repo.update_scenario_field(scenario_id, image_url=image_url)
         fsm.clear_state(user_id)
@@ -663,7 +661,7 @@ async def _handle_admin_fsm_text(
         fsm.set_state(user_id, "broadcast_w_image", {"title": text.strip()})
         await api.send_message_with_keyboard(
             user_id,
-            "Пришлите картинку файлом или ссылкой (достаточно домена, https подставится сам), либо «Без картинки».",
+            "Пришлите изображение или нажмите «Без картинки».",
             admin_broadcast_skip_image_keyboard(),
         )
         return True
@@ -685,14 +683,14 @@ async def _handle_admin_fsm_text(
             if not (text or "").strip():
                 await api.send_message(
                     user_id,
-                    "Пришлите картинку файлом, URL (https://…) или нажмите «Без картинки».",
+                    "Пришлите изображение или нажмите «Без картинки».",
                 )
                 return True
-            url = text.strip()
-            if not url.startswith("http"):
-                await api.send_message(user_id, "Укажите полный URL, начиная с https://, или отправьте фото.")
-                return True
-            image_ref = url
+            await api.send_message(
+                user_id,
+                "Нужна картинка файлом или «Без картинки».",
+            )
+            return True
 
         fsm.set_state(user_id, "broadcast_w_text", st.data | {"image_url": image_ref})
         await api.send_message(
@@ -723,12 +721,12 @@ async def _handle_admin_fsm_text(
             )
             return True
         fsm.set_state(user_id, "broadcast_w_button_url", st.data | {"button_text": text.strip()})
-        await api.send_message(user_id, "Введите URL для кнопки (можно без https://):")
+        await api.send_message(user_id, "Введите адрес, куда будет вести кнопка:")
         return True
 
     if state == "broadcast_w_button_url":
         if not text.strip():
-            await api.send_message(user_id, "URL не может быть пустым.")
+            await api.send_message(user_id, "Адрес не может быть пустым.")
             return True
         url = _normalize_broadcast_https_url(text)
         data = st.data | {"button_url": url}
@@ -1028,8 +1026,7 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        cur = f"\nТекущая картинка: {scenario.image_url}" if scenario.image_url else ""
-        msg_text = f"📷 Отправьте фото сюда в чат или введите URL картинки.{cur}"
+        msg_text = "📷 Отправьте изображение сообщением ниже."
         fsm.set_state(user_id, "scenario_edit_image", {
             "scenario_id": scenario_id,
             "_msg_id": message_id,
@@ -1327,7 +1324,7 @@ async def _handle_admin_callback(
         fsm.clear_state(user_id)
         await _edit(
             "Рассылка всем пользователям из базы лидов:\n"
-            "картинка файлом или по URL (по желанию), описание, кнопка со ссылкой.\n"
+            "изображение (по желанию), текст, кнопка с переходом.\n"
             "Можно отправить сразу или запланировать.",
             admin_broadcast_entry_keyboard(),
         )
@@ -1370,7 +1367,7 @@ async def _handle_admin_callback(
         )
         await _edit_then_ask(
             f"Текст кнопки: «{_BROADCAST_DEFAULT_BUTTON_TEXT}»",
-            "Введите URL для кнопки (https://...):",
+            "Введите адрес, куда будет вести кнопка:",
         )
         return
 
@@ -1549,27 +1546,28 @@ async def handle_max_webhook(
 
             fsm.clear_state(ev.user_id)
 
-            # Формируем текст материала (ТЗ: картинка + описание, затем «Далее»)
-            parts = []
-            if scenario.image_url:
-                parts.append(scenario.image_url)
-            if scenario.description:
-                parts.append(scenario.description)
-            msg = "\n\n".join(parts) if parts else scenario.title
-            msg = (msg or "").strip() or (scenario.title or "Акция")
+            desc = (scenario.description or "").strip()
+            title = (scenario.title or "Акция").strip()
+            kb = user_material_keyboard(scenario_code, None)
 
             if not offer_produces_valid_links(scenario.offer):
                 await api.send_message(
                     ev.user_id,
-                    "Ошибка: у оффера не задана основная ссылка. Укажите её в админке (хотя бы домен, без https тоже можно).",
+                    "Ошибка: для оффера не задана основная ссылка. Обратитесь к администратору.",
                 )
                 return Response(status_code=200)
 
-            await api.send_message_with_keyboard(
-                ev.user_id,
-                msg,
-                user_material_keyboard(scenario_code, None),
-            )
+            if scenario.image_url:
+                token = await api.resolve_broadcast_image_token(scenario.image_url)
+                if token:
+                    body = desc if desc else title
+                    await api.send_message_with_image_and_keyboard(ev.user_id, body, token, kb)
+                else:
+                    body = "\n\n".join(x for x in (title, desc) if x).strip() or title
+                    await api.send_message_with_keyboard(ev.user_id, body, kb)
+            else:
+                body = desc if desc else title
+                await api.send_message_with_keyboard(ev.user_id, body, kb)
 
             return Response(status_code=200)
 
