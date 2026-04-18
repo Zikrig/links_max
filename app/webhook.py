@@ -36,6 +36,8 @@ from app.keyboards.admin import (
     admin_offers_keyboard,
     admin_platform_view_keyboard,
     admin_platforms_keyboard,
+    admin_replica_cancel_keyboard,
+    admin_replicas_menu_keyboard,
     admin_scenario_channels_keyboard,
     admin_scenario_select_offer_keyboard,
     admin_scenario_settings_keyboard,
@@ -50,6 +52,12 @@ from app.keyboards.user import (
 from app.max_api import MaxApiClient, RateLimitError
 from app.services.broadcast_runner import get_scheduler, launch_broadcast_now, schedule_broadcast_job
 from app.services.export_service import ExportService
+from app.services.replica_messages import (
+    DEFAULT_REPLICA_AFTER_LINK,
+    DEFAULT_REPLICA_STRANGER,
+    send_replica_with_offers,
+)
+from app.services.replica_runner import schedule_after_link_replica
 from app.services.link_builder import build_offer_link, offer_produces_valid_links
 from app.services.user_flow import UserFlowService
 from app.validators import validate_full_name, validate_phone
@@ -262,6 +270,36 @@ def _extract_event(payload: dict) -> Event:
     )
 
 
+def _parse_start_scenario_code(ev: Event) -> tuple[str, bool]:
+    """
+    (код сценария, is_stranger). «Незнакомец» — только bot_started или /start без аргумента,
+    либо ссылка max.ru с пустым start=.
+    """
+    if ev.update_type == "bot_started":
+        code = (ev.text or "").strip()
+        return code, not bool(code)
+
+    if ev.update_type == "message_created":
+        t = (ev.text or "").strip()
+        if t.startswith("/start"):
+            parts = t.split(maxsplit=1)
+            arg = (parts[1] if len(parts) > 1 else "").strip()
+            return arg, not bool(arg)
+        if "start=" in t and "max.ru" in t:
+            try:
+                code = t.split("start=", 1)[1].split("&")[0].strip()
+            except Exception:
+                code = ""
+            return code, not bool(code)
+
+    return "", False
+
+
+def _short_replica_preview(stored: str, default: str) -> str:
+    t = (stored or "").strip() or default
+    return t if len(t) <= 400 else t[:397] + "…"
+
+
 # ---------------------------------------------------------------------------
 # FSM: подписчик — ФИО и телефон после «Далее» и проверки подписки (ТЗ)
 # ---------------------------------------------------------------------------
@@ -431,6 +469,7 @@ async def _handle_user_callback(
             "Для оформления карты на сайте банка перейдите по ссылке ниже.",
             user_card_keyboard(link),
         )
+        schedule_after_link_replica(user_id)
         return
 
 
@@ -680,6 +719,32 @@ async def _handle_admin_fsm_text(
         await _reply(f"✅ Канал «{ch_title}» добавлен.", admin_scenario_channels_keyboard(scenario_id, channels))
         return True
 
+    if state == "replica_edit_stranger":
+        if not (text or "").strip():
+            await api.send_message(user_id, "Текст не может быть пустым.")
+            return True
+        repo.update_replica_stranger_text(text.strip())
+        fsm.clear_state(user_id)
+        rs = repo.get_replica_settings()
+        await _reply(
+            f"✅ Сохранено.\n\nТекущий текст «Для незнакомцев»:\n{rs.stranger_text}",
+            admin_replicas_menu_keyboard(),
+        )
+        return True
+
+    if state == "replica_edit_after":
+        if not (text or "").strip():
+            await api.send_message(user_id, "Текст не может быть пустым.")
+            return True
+        repo.update_replica_after_link_text(text.strip())
+        fsm.clear_state(user_id)
+        rs = repo.get_replica_settings()
+        await _reply(
+            f"✅ Сохранено.\n\nТекущий текст «После акции»:\n{rs.after_link_text}",
+            admin_replicas_menu_keyboard(),
+        )
+        return True
+
     # --- Рассылка (мастер) ---
 
     if state == "broadcast_w_title":
@@ -913,6 +978,41 @@ async def _handle_admin_callback(
     if cb_payload == "admin:main":
         fsm.clear_state(user_id)
         await _edit("Админ-меню:", admin_main_keyboard())
+        return
+
+    if cb_payload == "admin:replicas":
+        fsm.clear_state(user_id)
+        rs = repo.get_replica_settings()
+        s1 = _short_replica_preview(rs.stranger_text, DEFAULT_REPLICA_STRANGER)
+        s2 = _short_replica_preview(rs.after_link_text, DEFAULT_REPLICA_AFTER_LINK)
+        await _edit(
+            "💬 Управление репликами\n\n"
+            "К обоим сообщениям добавляются кнопки последних 10 офферов "
+            "(по дате создания карточки; ссылка — на сценарий оффера).\n\n"
+            f"👤 Для незнакомцев (вход без кода в ссылке):\n{s1}\n\n"
+            f"⏱ После акции (через 5 мин после выдачи ссылки на карту):\n{s2}",
+            admin_replicas_menu_keyboard(),
+        )
+        return
+
+    if cb_payload.startswith("admin:replica_edit:"):
+        kind = cb_payload.split(":")[-1]
+        if kind not in ("stranger", "after"):
+            await _ack()
+            return
+        rs = repo.get_replica_settings()
+        current = rs.stranger_text if kind == "stranger" else rs.after_link_text
+        title = (
+            "Для незнакомцев"
+            if kind == "stranger"
+            else "После акции (через 5 мин после выдачи ссылки на карту)"
+        )
+        fsm.set_state(user_id, f"replica_edit_{kind}", {})
+        await _edit_then_ask(
+            f"Редактирование: {title}",
+            f"Текущий текст:\n\n{current}\n\nОтправьте новый текст сообщения:",
+            admin_replica_cancel_keyboard(),
+        )
         return
 
     # --- Платформы ---
@@ -1723,18 +1823,7 @@ async def handle_max_webhook(
 
         # bot_started: text = значение ?start= из deep link
         # message_created: /start <code> как fallback, а также полный URL deep link
-        scenario_code = ""
-        if ev.update_type == "bot_started":
-            scenario_code = ev.text
-        elif ev.text.startswith("/start"):
-            parts = ev.text.split(maxsplit=1)
-            scenario_code = parts[1] if len(parts) > 1 else ""
-        elif "start=" in ev.text and "max.ru" in ev.text:
-            # MAX присылает message_created с полным URL: https://max.ru/join/bot?start=sc9ac188ca
-            try:
-                scenario_code = ev.text.split("start=", 1)[1].split("&")[0].strip()
-            except Exception:
-                pass
+        scenario_code, is_stranger_start = _parse_start_scenario_code(ev)
 
         if scenario_code:
             scenario = repo.get_scenario_by_code(scenario_code)
@@ -1767,6 +1856,13 @@ async def handle_max_webhook(
                 body = desc if desc else title
                 await api.send_message_with_keyboard(ev.user_id, body, kb)
 
+            return Response(status_code=200)
+
+        if is_stranger_start:
+            fsm.clear_state(ev.user_id)
+            rs = repo.get_replica_settings()
+            text = (rs.stranger_text or "").strip() or DEFAULT_REPLICA_STRANGER
+            await send_replica_with_offers(api, repo, settings, ev.user_id, body_text=text)
             return Response(status_code=200)
 
         return Response(status_code=200)

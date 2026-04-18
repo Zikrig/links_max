@@ -24,7 +24,20 @@ def admin_main_keyboard() -> list:
         # [_btn("📢 Каналы подписки", "admin:channels")],
         [_btn("📊 Экспорт", "admin:export")],
         [_btn("📣 Рассылка", "admin:broadcast")],
+        [_btn("💬 Управление репликами", "admin:replicas")],
     ]
+
+
+def admin_replicas_menu_keyboard() -> list:
+    return [
+        [_btn("👤 Для незнакомцев", "admin:replica_edit:stranger")],
+        [_btn("⏱ После акции (через 5 мин)", "admin:replica_edit:after")],
+        [_btn("🔙 Назад", "admin:main")],
+    ]
+
+
+def admin_replica_cancel_keyboard() -> list:
+    return [[_btn("🔙 Отмена", "admin:replicas")]]
 
 
 def admin_platforms_keyboard(platforms: list, page: int = 0) -> list:
@@ -210,13 +223,20 @@ BROADCAST_MANAGE_PAGE_SIZE = 5
 
 
 def admin_broadcast_manage_keyboard(page: int, total_count: int, items: list) -> list:
-    """Список рассылок с пагинацией."""
+    """Список рассылок с пагинацией. Неотправленные — отмена в строке; отправленные — быстрый повтор."""
     rows: list = []
     for b in items:
         title = (getattr(b, "title", None) or "без названия").replace("\n", " ").strip()
         if len(title) > 30:
             title = title[:27] + "…"
-        rows.append([_btn(f"#{b.id} «{title}»", f"admin:broadcast_view:{b.id}")])
+        main = _btn(f"#{b.id} «{title}»", f"admin:broadcast_view:{b.id}")
+        st = getattr(b, "status", "") or ""
+        if st == "scheduled":
+            rows.append([main, _btn("🚫", f"admin:broadcast_cancel_pending:{b.id}")])
+        elif st in ("sent", "failed"):
+            rows.append([main, _btn("📋", f"admin:broadcast_repeat:{b.id}")])
+        else:
+            rows.append([main])
     if total_count == 0:
         rows.append([_btn("🔙 Назад", "admin:broadcast")])
         return rows
@@ -239,11 +259,11 @@ def admin_broadcast_manage_cancel_keyboard() -> list:
 
 
 def admin_broadcast_detail_keyboard(broadcast_id: int, status: str) -> list:
+    """Карточка рассылки: отмена только в списке (для scheduled). Копия после «Повторить» — без отмены здесь."""
     rows: list = []
     if status == "scheduled":
         rows.append([_btn("▶ Отправить сейчас", f"admin:broadcast_now:{broadcast_id}")])
         rows.append([_btn("📅 Другое время", f"admin:broadcast_reschedule:{broadcast_id}")])
-        rows.append([_btn("🚫 Отменить", f"admin:broadcast_cancel_pending:{broadcast_id}")])
     elif status in ("sent", "failed"):
         rows.append([_btn("📋 Повторить (копия)", f"admin:broadcast_repeat:{broadcast_id}")])
     rows.append([_btn("🔙 К списку", "admin:broadcast_manage:0")])

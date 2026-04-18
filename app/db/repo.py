@@ -5,6 +5,9 @@ from sqlalchemy.orm import Session
 
 from app.db import models
 
+_DEFAULT_REPLICA_STRANGER = "Привет, у нас есть для вас пара акций."
+_DEFAULT_REPLICA_AFTER_LINK = "У нас есть еще пара предложений для вас!"
+
 
 class Repo:
     def __init__(self, db: Session):
@@ -55,6 +58,38 @@ class Repo:
         if platform_id is not None:
             stmt = stmt.where(models.Offer.platform_id == platform_id)
         return list(self.db.scalars(stmt))
+
+    def list_offers_recent(self, limit: int = 10) -> list[models.Offer]:
+        stmt = (
+            select(models.Offer)
+            .order_by(models.Offer.created_date.desc(), models.Offer.id.desc())
+            .limit(limit)
+        )
+        return list(self.db.scalars(stmt))
+
+    def get_replica_settings(self) -> models.ReplicaSettings:
+        row = self.db.get(models.ReplicaSettings, 1)
+        if row:
+            return row
+        row = models.ReplicaSettings(
+            id=1,
+            stranger_text=_DEFAULT_REPLICA_STRANGER,
+            after_link_text=_DEFAULT_REPLICA_AFTER_LINK,
+        )
+        self.db.add(row)
+        self.db.commit()
+        self.db.refresh(row)
+        return row
+
+    def update_replica_stranger_text(self, text: str) -> None:
+        r = self.get_replica_settings()
+        r.stranger_text = text
+        self.db.commit()
+
+    def update_replica_after_link_text(self, text: str) -> None:
+        r = self.get_replica_settings()
+        r.after_link_text = text
+        self.db.commit()
 
     def get_scenario_for_offer(self, offer_id: int) -> models.Scenario | None:
         return self.db.scalar(select(models.Scenario).where(models.Scenario.offer_id == offer_id))

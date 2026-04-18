@@ -108,6 +108,16 @@ class Lead(Base):
     scenario: Mapped["Scenario"] = relationship(back_populates="leads")
 
 
+class ReplicaSettings(Base):
+    """Тексты реплик «без сценария» и «после выдачи ссылки»; одна строка id=1."""
+
+    __tablename__ = "replica_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    stranger_text: Mapped[str] = mapped_column(Text)
+    after_link_text: Mapped[str] = mapped_column(Text)
+
+
 class Broadcast(Base):
     __tablename__ = "broadcasts"
 
