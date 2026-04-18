@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
+from datetime import datetime
 import logging
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from sqlalchemy import text
@@ -81,9 +83,18 @@ def _run_migrations() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    settings = get_settings()
+    now_local = datetime.now(ZoneInfo(settings.tz))
+    now_utc = now_local.astimezone(ZoneInfo("UTC"))
+    logger.info(
+        "Время на сервере при старте: %s (%s), %s UTC",
+        now_local.strftime("%Y-%m-%d %H:%M:%S"),
+        settings.tz,
+        now_utc.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
     Base.metadata.create_all(bind=engine)
     _run_migrations()
-    settings = get_settings()
     max_api = MaxApiClient(settings.bot_token)
     subscribed = False
     webhook_url = ""

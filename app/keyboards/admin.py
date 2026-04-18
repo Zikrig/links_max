@@ -221,9 +221,10 @@ def admin_broadcast_skip_image_keyboard() -> list:
     ]
 
 
-def admin_broadcast_default_button_keyboard() -> list:
+def admin_broadcast_default_button_keyboard(default_label: str = "Перейти к акции") -> list:
+    """Кнопка показывает текст по умолчанию, чтобы админ видел, что будет подставлено."""
     return [
-        [_btn("📌 Текст по умолчанию", "admin:broadcast_default_btn")],
+        [_btn(f"📌 {default_label}", "admin:broadcast_default_btn")],
         [_btn("🔙 Отмена", "admin:broadcast_cancel")],
     ]
 

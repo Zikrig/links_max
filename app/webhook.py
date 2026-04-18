@@ -84,6 +84,10 @@ def _normalize_broadcast_https_url(raw: str) -> str:
     return f"https://{t}"
 
 
+# Текст кнопки по умолчанию в рассылке (ТЗ и модель Broadcast)
+_BROADCAST_DEFAULT_BUTTON_TEXT = "Перейти к акции"
+
+
 def _format_broadcast_preview(data: dict) -> str:
     lines = ["📣 Превью рассылки", "", f"Заголовок: {data.get('title', '')}"]
     img = data.get("image_url")
@@ -94,7 +98,8 @@ def _format_broadcast_preview(data: dict) -> str:
     else:
         lines.append("Картинка: да (вложение)")
     lines.extend(["", data.get("text", ""), ""])
-    lines.append(f"Кнопка: «{data.get('button_text', '')}» → {data.get('button_url', '')}")
+    btn = data.get("button_text") or _BROADCAST_DEFAULT_BUTTON_TEXT
+    lines.append(f"Кнопка: «{btn}» → {data.get('button_url', '')}")
     return "\n".join(lines)
 
 
@@ -703,14 +708,19 @@ async def _handle_admin_fsm_text(
         fsm.set_state(user_id, "broadcast_w_button_text", st.data | {"text": text.strip()})
         await api.send_message_with_keyboard(
             user_id,
-            "Введите текст на кнопке или выберите значение по умолчанию:",
-            admin_broadcast_default_button_keyboard(),
+            f"Введите текст на кнопке.\n\n"
+            f"По умолчанию: «{_BROADCAST_DEFAULT_BUTTON_TEXT}» — или нажмите кнопку с этой надписью ниже.",
+            admin_broadcast_default_button_keyboard(_BROADCAST_DEFAULT_BUTTON_TEXT),
         )
         return True
 
     if state == "broadcast_w_button_text":
         if not text.strip():
-            await api.send_message(user_id, 'Введите текст кнопки или нажмите «Текст по умолчанию».')
+            await api.send_message(
+                user_id,
+                f"Введите текст кнопки или нажмите «{_BROADCAST_DEFAULT_BUTTON_TEXT}» ниже.\n"
+                f"Значение по умолчанию: «{_BROADCAST_DEFAULT_BUTTON_TEXT}».",
+            )
             return True
         fsm.set_state(user_id, "broadcast_w_button_url", st.data | {"button_text": text.strip()})
         await api.send_message(user_id, "Введите URL для кнопки (можно без https://):")
@@ -745,7 +755,7 @@ async def _handle_admin_fsm_text(
                 title=data["title"],
                 text=data["text"],
                 button_url=data["button_url"],
-                button_text=data.get("button_text", "Перейти к акции"),
+                button_text=data.get("button_text", _BROADCAST_DEFAULT_BUTTON_TEXT),
                 image_url=data.get("image_url"),
                 send_at=when,
             )
@@ -1355,9 +1365,11 @@ async def _handle_admin_callback(
         if not st or st.state != "broadcast_w_button_text":
             await _ack()
             return
-        fsm.set_state(user_id, "broadcast_w_button_url", st.data | {"button_text": "Перейти к акции"})
+        fsm.set_state(
+            user_id, "broadcast_w_button_url", st.data | {"button_text": _BROADCAST_DEFAULT_BUTTON_TEXT}
+        )
         await _edit_then_ask(
-            'Текст кнопки: «Перейти к акции»',
+            f"Текст кнопки: «{_BROADCAST_DEFAULT_BUTTON_TEXT}»",
             "Введите URL для кнопки (https://...):",
         )
         return
@@ -1374,7 +1386,7 @@ async def _handle_admin_callback(
                 title=data["title"],
                 text=data["text"],
                 button_url=data["button_url"],
-                button_text=data.get("button_text", "Перейти к акции"),
+                button_text=data.get("button_text", _BROADCAST_DEFAULT_BUTTON_TEXT),
                 image_url=data.get("image_url"),
                 send_at=None,
             )
