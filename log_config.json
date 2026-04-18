@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "disable_existing_handlers": false,
+  "disable_existing_loggers": false,
   "formatters": {
     "default": {
       "()": "uvicorn.logging.DefaultFormatter",
@@ -25,6 +25,10 @@
       "stream": "ext://sys.stdout"
     }
   },
+  "root": {
+    "handlers": ["default"],
+    "level": "INFO"
+  },
   "loggers": {
     "uvicorn": {
       "handlers": ["default"],
@@ -32,14 +36,16 @@
       "propagate": false
     },
     "uvicorn.error": {
-      "handlers": ["default"],
       "level": "INFO",
-      "propagate": false
+      "propagate": true
     },
     "uvicorn.access": {
       "handlers": ["access"],
       "level": "INFO",
       "propagate": false
-    }
+    },
+    "httpx": {"level": "WARNING", "propagate": true},
+    "httpcore": {"level": "WARNING", "propagate": true},
+    "sqlalchemy": {"level": "WARNING", "propagate": true}
   }
 }

@@ -13,7 +13,7 @@ from app.webhook import router as webhook_router
 
 logger = logging.getLogger(__name__)
 
-_MIGRATIONS = [
+_MIGRATIONS: list[str | list[str]] = [
     "ALTER TABLE leads ADD COLUMN max_name VARCHAR(255)",
     "ALTER TABLE leads ADD COLUMN max_username VARCHAR(120)",
     "ALTER TABLE offers ADD COLUMN base_url TEXT DEFAULT ''",
@@ -32,17 +32,68 @@ _MIGRATIONS = [
         "invite_link VARCHAR(255)"
         ")"
     ),
+    # Сделать scenarios.description nullable (SQLite не умеет ALTER COLUMN)
+    [
+        "CREATE TABLE IF NOT EXISTS scenarios_new ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "offer_id INTEGER NOT NULL REFERENCES offers(id), "
+        "code VARCHAR(80) NOT NULL UNIQUE, "
+        "title VARCHAR(200) NOT NULL, "
+        "description TEXT, "
+        "image_url TEXT, "
+        "check_subscription BOOLEAN NOT NULL DEFAULT 0, "
+        "created_at DATETIME"
+        ")",
+        "INSERT OR IGNORE INTO scenarios_new "
+        "SELECT id, offer_id, code, title, description, image_url, check_subscription, created_at "
+        "FROM scenarios",
+        "DROP TABLE scenarios",
+        "ALTER TABLE scenarios_new RENAME TO scenarios",
+    ],
 ]
+
+
+def _fix_scenarios_description_nullable(conn) -> None:
+    """SQLite не поддерживает ALTER COLUMN — пересоздаём таблицу если description NOT NULL."""
+    rows = conn.execute(text("PRAGMA table_info(scenarios)")).fetchall()
+    for row in rows:
+        # row: (cid, name, type, notnull, dflt_value, pk)
+        if row[1] == "description" and row[3] == 1:  # notnull=1 => нужна миграция
+            for sql in [
+                "CREATE TABLE scenarios_new ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "offer_id INTEGER NOT NULL REFERENCES offers(id), "
+                "code VARCHAR(80) NOT NULL UNIQUE, "
+                "title VARCHAR(200) NOT NULL, "
+                "description TEXT, "
+                "image_url TEXT, "
+                "check_subscription BOOLEAN NOT NULL DEFAULT 0, "
+                "created_at DATETIME)",
+                "INSERT INTO scenarios_new "
+                "SELECT id, offer_id, code, title, description, image_url, check_subscription, created_at "
+                "FROM scenarios",
+                "DROP TABLE scenarios",
+                "ALTER TABLE scenarios_new RENAME TO scenarios",
+            ]:
+                conn.execute(text(sql))
+            conn.commit()
+            logger.info("Migration applied: scenarios.description made nullable")
+            break
 
 
 def _run_migrations() -> None:
     with engine.connect() as conn:
-        for sql in _MIGRATIONS:
+        for migration in _MIGRATIONS:
             try:
-                conn.execute(text(sql))
+                if isinstance(migration, list):
+                    for sql in migration:
+                        conn.execute(text(sql))
+                else:
+                    conn.execute(text(migration))
                 conn.commit()
             except Exception:
-                pass  # колонка уже существует
+                pass  # колонка уже существует или миграция уже применена
+        _fix_scenarios_description_nullable(conn)
 
 
 @asynccontextmanager
