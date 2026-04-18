@@ -75,15 +75,20 @@ def _extract_event(payload: dict) -> tuple[int, str, str, str, str, str]:
         )
 
     if update_type == "bot_started":
-        msg = payload.get("message", {}) or {}
-        sender = msg.get("sender", {}) or {}
+        # MAX передаёт значение ?start= в поле payload верхнего уровня.
+        # user может быть как верхнеуровневым полем, так и внутри message.sender.
+        user = payload.get("user", {}) or {}
+        if not user:
+            msg = payload.get("message", {}) or {}
+            user = msg.get("sender", {}) or {}
+        start_payload = str(payload.get("payload", "") or "").strip()
         return (
-            int(sender.get("user_id") or 0),
-            "/start",
+            int(user.get("user_id") or 0),
+            start_payload,   # код сценария напрямую, без /start
             update_type,
             "",
-            str(sender.get("name", "") or ""),
-            str(sender.get("username", "") or ""),
+            str(user.get("name", "") or ""),
+            str(user.get("username", "") or ""),
         )
 
     return int(payload.get("user_id", 0)), str(payload.get("text", "")).strip(), update_type, "", "", ""
@@ -344,7 +349,7 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
             if settings.bot_username:
                 deep_link = f"https://max.ru/join/{settings.bot_username}?start={scenario.code}"
             else:
-                deep_link = f"{settings.webhook_base_url.rstrip('/')}/start?code={scenario.code}"
+                deep_link = f"https://max.ru/start?start={scenario.code}"  # fallback без bot_username
             repo.create_or_update_bot_link(scenario.id, deep_link)
             scenarios = repo.list_scenarios()
             await api.send_message_with_keyboard(
@@ -651,10 +656,17 @@ async def handle_max_webhook(
             )
             return Response(status_code=200)
 
-        if text.startswith("/start"):
+        # bot_started: text = значение ?start= из deep link
+        # message_created: поддерживаем /start <code> как fallback для тестов
+        scenario_code = ""
+        if update_type == "bot_started":
+            scenario_code = text  # payload от ?start=
+        elif text.startswith("/start"):
             parts = text.split(maxsplit=1)
             scenario_code = parts[1] if len(parts) > 1 else ""
-            scenario = repo.get_scenario_by_code(scenario_code) if scenario_code else None
+
+        if scenario_code:
+            scenario = repo.get_scenario_by_code(scenario_code)
             if not scenario:
                 await api.send_message(user_id, "Сценарий не найден. Используйте корректную ссылку.")
                 return Response(status_code=200)
