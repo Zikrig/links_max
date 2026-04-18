@@ -280,51 +280,108 @@ class MaxApiClient:
             resp = await self._request("GET", f"/chats/{chat_id}")
             if resp.status_code == 200:
                 data = resp.json()
-                title = data.get("title") or data.get("chat_id") or str(chat_id)
+                u = _unwrap_chat_dict(data) or data
+                title = u.get("title") or u.get("name") or u.get("chat_id") or str(chat_id)
                 return True, str(title)
             if resp.status_code == 403:
                 return False, "Бот не является участником канала/чата. Добавьте бота в канал."
             if resp.status_code == 404:
+                # Часто в MAX chat_id приходит с другим знаком — пробуем инверсию
+                if chat_id != 0:
+                    alt = -chat_id
+                    resp2 = await self._request("GET", f"/chats/{alt}")
+                    if resp2.status_code == 200:
+                        data = resp2.json()
+                        u = _unwrap_chat_dict(data) or data
+                        title = u.get("title") or u.get("name") or str(alt)
+                        return True, str(title)
                 return False, "Канал/чат не найден. Проверьте chat_id."
             return False, f"Ошибка доступа: HTTP {resp.status_code}"
         except Exception as e:
             return False, f"Ошибка проверки: {e}"
 
-    async def check_bot_is_channel_admin(self, chat_id: int) -> tuple[bool, str]:
+    async def get_bot_membership(self, chat_id: int) -> tuple[dict | None, str, int | None]:
         """
-        Проверить что бот является администратором канала.
-        Возвращает (ok, title_канала) или (False, описание_ошибки).
+        GET /chats/{chat_id}/members/me — как в max_users_resend (надёжнее, чем /members/{user_id}).
+        Возвращает (membership, ошибка, chat_id с которым сработал запрос — для сохранения в БД).
         """
-        me = await self.get_me()
-        bot_user_id = me.get("user_id") or me.get("id")
-        if not bot_user_id:
-            return False, "Не удалось получить user_id бота."
+        async def _one(cid: int) -> tuple[dict | None, int]:
+            try:
+                r = await self._request("GET", f"/chats/{cid}/members/me")
+                if r.status_code != 200:
+                    return None, r.status_code
+                data = r.json()
+                if not isinstance(data, dict):
+                    return None, r.status_code
+                return data, r.status_code
+            except Exception as exc:
+                logger.warning("GET /chats/%s/members/me: %s", cid, exc)
+                return None, 0
 
+        m, code = await _one(chat_id)
+        if m is not None:
+            return m, "", chat_id
+        if chat_id != 0:
+            m2, _ = await _one(-chat_id)
+            if m2 is not None:
+                return m2, "", -chat_id
+        return None, f"Не удалось получить участие бота в канале (HTTP {code}). Добавьте бота в канал.", None
+
+    def _membership_allows_channel_admin(self, m: dict) -> bool:
+        """Поля как в max_users_resend: is_owner / is_admin / role / permissions."""
+        if m.get("is_owner"):
+            return True
+        if m.get("is_admin"):
+            return True
+        role = str(m.get("role", "") or "").lower()
+        if role in ("admin", "owner", "creator", "administrator", "channel_admin"):
+            return True
+        perms = m.get("permissions")
+        if isinstance(perms, list) and perms:
+            ps = {str(x).lower() for x in perms}
+            if ps & {"admin", "all", "owner"}:
+                return True
+        return False
+
+    async def check_bot_is_channel_admin(self, chat_id: int) -> tuple[bool, str, int | None]:
+        """
+        Проверить что бот — администратор канала (через /members/me, как max_users_resend).
+        Возвращает (ok, title_канала или ошибка, chat_id для БД если отличается от входного — знак MAX).
+        """
         ok, title = await self.check_chat_access(chat_id)
         if not ok:
-            return False, title
+            return False, title, None
 
-        member = await self.get_chat_member(chat_id, int(bot_user_id))
+        member, err, eff_id = await self.get_bot_membership(chat_id)
         if member is None:
-            return False, "Бот не является участником канала. Добавьте бота в канал."
+            return False, err or "Не удалось проверить участие бота в канале.", None
 
-        role = str(member.get("role", "")).lower()
-        if role not in ("admin", "owner", "creator"):
+        if not self._membership_allows_channel_admin(member):
+            role = str(member.get("role", "") or "—")
             return False, (
-                f"Бот в канале, но не администратор (роль: «{role or '—'}»). "
-                "Выдайте боту права администратора — иначе нельзя проверять подписку."
-            )
-        return True, title
+                f"Бот в канале, но недостаточно прав для проверки подписки (роль: «{role}»). "
+                "Назначьте бота администратором канала."
+            ), None
+        store_id = eff_id if eff_id is not None else chat_id
+        return True, title, store_id
 
     async def get_chat_member(self, chat_id: int, user_id: int) -> dict | None:
-        """Проверить членство user_id в чате/канале. None = не в чате или ошибка."""
-        try:
-            response = await self._request("GET", f"/chats/{chat_id}/members/{user_id}")
-            if response.status_code == 200:
-                return response.json()
-            return None
-        except Exception:
-            return None
+        """Проверить членство user_id в чате/канале. None = не в чате или ошибка. Пробуем оба знака chat_id."""
+        async def _one(cid: int) -> dict | None:
+            try:
+                response = await self._request("GET", f"/chats/{cid}/members/{user_id}")
+                if response.status_code == 200:
+                    return response.json()
+                return None
+            except Exception:
+                return None
+
+        m = await _one(chat_id)
+        if m is not None:
+            return m
+        if chat_id != 0:
+            return await _one(-chat_id)
+        return None
 
     async def upload_file(self, file_bytes: bytes, filename: str) -> str | None:
         """Загрузить файл в MAX, вернуть token для использования в сообщении."""

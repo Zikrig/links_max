@@ -317,10 +317,11 @@ async def _handle_admin_fsm_text(
             if not ok or chat_id is None:
                 await api.send_message(user_id, f"⚠️ {title_or_err}\n\nПопробуйте другую ссылку.")
                 return True
-            ok_adm, adm_detail = await api_ch.check_bot_is_channel_admin(chat_id)
+            ok_adm, adm_detail, eff_chat_id = await api_ch.check_bot_is_channel_admin(chat_id)
             if not ok_adm:
                 await api.send_message(user_id, f"⚠️ {adm_detail}")
                 return True
+            chat_id = eff_chat_id if eff_chat_id is not None else chat_id
         finally:
             await api_ch.close()
         data = st.data
@@ -442,13 +443,14 @@ async def _handle_admin_fsm_text(
             if not ok or chat_id is None:
                 await api.send_message(user_id, f"⚠️ {title_or_err}\n\nПопробуйте другую ссылку.")
                 return True
-            ok_adm, detail = await api_ch.check_bot_is_channel_admin(chat_id)
+            ok_adm, ch_title, eff_chat_id = await api_ch.check_bot_is_channel_admin(chat_id)
             if not ok_adm:
                 await api.send_message(
                     user_id,
-                    f"⚠️ {detail}\n\nПришлите другую ссылку или нажмите «Назад».",
+                    f"⚠️ {ch_title}\n\nПришлите другую ссылку или нажмите «Назад».",
                 )
                 return True
+            chat_id = eff_chat_id if eff_chat_id is not None else chat_id
         finally:
             await api_ch.close()
 
@@ -456,11 +458,11 @@ async def _handle_admin_fsm_text(
         repo.add_scenario_channel(
             scenario_id=scenario_id,
             chat_id=chat_id,
-            title=detail,
+            title=ch_title,
             invite_link=link,
         )
         channels = repo.list_scenario_channels(scenario_id)
-        await _reply(f"✅ Канал «{detail}» добавлен.", admin_scenario_channels_keyboard(scenario_id, channels))
+        await _reply(f"✅ Канал «{ch_title}» добавлен.", admin_scenario_channels_keyboard(scenario_id, channels))
         return True
 
     return False
