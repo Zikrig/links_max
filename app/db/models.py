@@ -41,12 +41,26 @@ class Scenario(Base):
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    channel_chat_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    channel_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    check_subscription: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     offer: Mapped["Offer"] = relationship(back_populates="scenarios")
     bot_link: Mapped["BotLink"] = relationship(back_populates="scenario", uselist=False)
+    channels: Mapped[list["ScenarioChannel"]] = relationship(
+        back_populates="scenario", cascade="all, delete-orphan"
+    )
+
+
+class ScenarioChannel(Base):
+    __tablename__ = "scenario_channels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scenario_id: Mapped[int] = mapped_column(ForeignKey("scenarios.id"), index=True)
+    chat_id: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(200))
+    invite_link: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    scenario: Mapped["Scenario"] = relationship(back_populates="channels")
 
 
 class BotLink(Base):

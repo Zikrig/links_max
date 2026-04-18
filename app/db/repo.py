@@ -82,6 +82,28 @@ class Repo:
         self.db.refresh(scenario)
         return scenario
 
+    def add_scenario_channel(
+        self, scenario_id: int, chat_id: int, title: str, invite_link: str | None = None
+    ) -> models.ScenarioChannel:
+        ch = models.ScenarioChannel(
+            scenario_id=scenario_id, chat_id=chat_id, title=title, invite_link=invite_link
+        )
+        self.db.add(ch)
+        self.db.commit()
+        self.db.refresh(ch)
+        return ch
+
+    def list_scenario_channels(self, scenario_id: int) -> list[models.ScenarioChannel]:
+        return list(self.db.scalars(
+            select(models.ScenarioChannel).where(models.ScenarioChannel.scenario_id == scenario_id)
+        ))
+
+    def delete_scenario_channel(self, channel_id: int) -> None:
+        entity = self.db.get(models.ScenarioChannel, channel_id)
+        if entity:
+            self.db.delete(entity)
+            self.db.commit()
+
     def list_scenarios(self) -> list[models.Scenario]:
         return list(self.db.scalars(select(models.Scenario).order_by(models.Scenario.created_at.desc())))
 
@@ -134,9 +156,9 @@ class Repo:
         user_id: int,
         scenario_id: int,
         offer_id: int,
-        full_name: str,
-        phone: str,
         subid_value: str,
+        full_name: str = "",
+        phone: str = "",
         consent_accepted: bool = True,
         max_name: str | None = None,
         max_username: str | None = None,

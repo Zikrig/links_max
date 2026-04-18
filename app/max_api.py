@@ -103,8 +103,16 @@ class MaxApiClient:
         response = await self._request("POST", "/messages", params=params, json=payload)
         response.raise_for_status()
 
+    async def get_me(self) -> dict:
+        """Получить информацию о боте (user_id и др.)."""
+        try:
+            resp = await self._request("GET", "/me")
+            return resp.json() if resp.status_code == 200 else {}
+        except Exception:
+            return {}
+
     async def check_chat_access(self, chat_id: int) -> tuple[bool, str]:
-        """Проверить доступ бота к чату. Возвращает (ok, описание)."""
+        """Проверить доступ бота к чату. Возвращает (ok, title/описание_ошибки)."""
         try:
             resp = await self._request("GET", f"/chats/{chat_id}")
             if resp.status_code == 200:
@@ -118,6 +126,32 @@ class MaxApiClient:
             return False, f"Ошибка доступа: HTTP {resp.status_code}"
         except Exception as e:
             return False, f"Ошибка проверки: {e}"
+
+    async def check_bot_is_channel_admin(self, chat_id: int) -> tuple[bool, str]:
+        """
+        Проверить что бот является администратором канала.
+        Возвращает (ok, title_канала) или (False, описание_ошибки).
+        """
+        me = await self.get_me()
+        bot_user_id = me.get("user_id") or me.get("id")
+        if not bot_user_id:
+            return False, "Не удалось получить user_id бота."
+
+        ok, title = await self.check_chat_access(chat_id)
+        if not ok:
+            return False, title
+
+        member = await self.get_chat_member(chat_id, int(bot_user_id))
+        if member is None:
+            return False, "Бот не является участником канала. Добавьте бота в канал."
+
+        role = str(member.get("role", "")).lower()
+        if role not in ("admin", "owner", "creator"):
+            return False, (
+                f"Бот в канале, но не администратор (роль: «{role or '—'}»). "
+                "Выдайте боту права администратора — иначе нельзя проверять подписку."
+            )
+        return True, title
 
     async def get_chat_member(self, chat_id: int, user_id: int) -> dict | None:
         """Проверить членство user_id в чате/канале. None = не в чате или ошибка."""

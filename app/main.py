@@ -18,8 +18,20 @@ _MIGRATIONS = [
     "ALTER TABLE leads ADD COLUMN max_username VARCHAR(120)",
     "ALTER TABLE offers ADD COLUMN base_url TEXT DEFAULT ''",
     "ALTER TABLE offers ADD COLUMN subid_param VARCHAR(80) DEFAULT ''",
+    # channel_chat_id / channel_title больше не используются (заменены ScenarioChannel),
+    # но миграции безвредны для существующих БД
     "ALTER TABLE scenarios ADD COLUMN channel_chat_id INTEGER",
     "ALTER TABLE scenarios ADD COLUMN channel_title VARCHAR(200)",
+    "ALTER TABLE scenarios ADD COLUMN check_subscription BOOLEAN DEFAULT 0",
+    (
+        "CREATE TABLE IF NOT EXISTS scenario_channels ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "scenario_id INTEGER NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE, "
+        "chat_id INTEGER NOT NULL, "
+        "title VARCHAR(200) NOT NULL, "
+        "invite_link VARCHAR(255)"
+        ")"
+    ),
 ]
 
 

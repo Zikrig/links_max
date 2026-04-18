@@ -56,16 +56,37 @@ def admin_offer_view_keyboard(offer, scenario, has_bot_link: bool = False) -> li
     ]
 
 
-def admin_scenario_settings_keyboard(scenario) -> list:
+def admin_scenario_settings_keyboard(scenario, channels: list | None = None) -> list:
     img_icon = _ind(bool(scenario.image_url))
     txt_icon = _ind(bool(scenario.description))
-    ch_icon = _ind(bool(scenario.channel_chat_id))
+
+    channels = channels or []
+    ch_count = len(channels)
+    sub_on = getattr(scenario, "check_subscription", False)
+    sub_icon = "🟢" if sub_on else "🔴"
+    sub_label = "ВКЛ" if sub_on else "ВЫКЛ"
+
+    if sub_on:
+        ch_icon = "🟢" if ch_count > 0 else "🔴"
+    else:
+        ch_icon = "🟡"
+
     return [
         [_btn(f"{img_icon} Картинка", f"admin:scenario_set_image:{scenario.id}")],
         [_btn(f"{txt_icon} Текст для подписчика", f"admin:scenario_set_text:{scenario.id}")],
-        [_btn(f"{ch_icon} Канал подписки", f"admin:scenario_set_channel:{scenario.id}")],
+        [_btn(f"{sub_icon} Проверка подписки: {sub_label}", f"admin:scenario_toggle_sub:{scenario.id}")],
+        [_btn(f"{ch_icon} Каналы ({ch_count})", f"admin:scenario_channels:{scenario.id}")],
         [_btn("🔙 Назад к офферу", f"admin:offer_view:{scenario.offer_id}")],
     ]
+
+
+def admin_scenario_channels_keyboard(scenario_id: int, channels: list) -> list:
+    rows = []
+    for ch in channels:
+        rows.append([_btn(f"❌ {ch.title}", f"admin:scenario_ch_del:{ch.id}")])
+    rows.append([_btn("➕ Добавить канал", f"admin:scenario_ch_add:{scenario_id}")])
+    rows.append([_btn("🔙 Назад к сценарию", f"admin:offer_scenario_view:{scenario_id}")])
+    return rows
 
 
 def admin_scenarios_keyboard(scenarios: list) -> list:
