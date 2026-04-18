@@ -108,6 +108,13 @@ class Repo:
         self.db.commit()
         return f"{current:04d}"
 
+    def list_offers_for_platform(self, platform_id: int) -> list[models.Offer]:
+        return list(self.db.scalars(
+            select(models.Offer)
+            .where(models.Offer.platform_id == platform_id)
+            .order_by(models.Offer.created_date.desc())
+        ))
+
     def create_lead(
         self,
         user_id: int,
@@ -117,6 +124,8 @@ class Repo:
         phone: str,
         subid_value: str,
         consent_accepted: bool = True,
+        max_name: str | None = None,
+        max_username: str | None = None,
     ) -> models.Lead:
         lead = models.Lead(
             user_id=user_id,
@@ -126,6 +135,8 @@ class Repo:
             phone=phone,
             subid_value=subid_value,
             consent_accepted=consent_accepted,
+            max_name=max_name,
+            max_username=max_username,
         )
         self.db.add(lead)
         self.db.commit()

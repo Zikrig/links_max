@@ -74,6 +74,8 @@ class Lead(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(Integer, index=True)
+    max_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    max_username: Mapped[str | None] = mapped_column(String(120), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255))
     phone: Mapped[str] = mapped_column(String(30))
     consent_accepted: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -103,6 +103,47 @@ class MaxApiClient:
         response = await self._request("POST", "/messages", params=params, json=payload)
         response.raise_for_status()
 
+    async def get_chat_member(self, chat_id: int, user_id: int) -> dict | None:
+        """Проверить членство user_id в чате/канале. None = не в чате или ошибка."""
+        try:
+            response = await self._request("GET", f"/chats/{chat_id}/members/{user_id}")
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception:
+            return None
+
+    async def upload_file(self, file_bytes: bytes, filename: str) -> str | None:
+        """Загрузить файл в MAX, вернуть token для использования в сообщении."""
+        try:
+            upload_resp = await self._request("POST", "/uploads", params={"type": "file"})
+            upload_resp.raise_for_status()
+            upload_url = upload_resp.json().get("url")
+            if not upload_url:
+                return None
+            put_resp = await self.client.put(
+                upload_url,
+                content=file_bytes,
+                headers={"Content-Type": "application/octet-stream", "Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+            put_resp.raise_for_status()
+            token = put_resp.json().get("token")
+            return token
+        except Exception as exc:
+            logger.warning("File upload failed: %s", exc)
+            return None
+
+    async def send_file(self, user_id: int, token: str, caption: str = "") -> None:
+        """Отправить загруженный файл пользователю."""
+        params = {"user_id": user_id} if user_id > 0 else {"chat_id": user_id}
+        payload: dict = {
+            "attachments": [{"type": "file", "payload": {"token": token}}],
+        }
+        if caption:
+            payload["text"] = caption
+        response = await self._request("POST", "/messages", params=params, json=payload)
+        response.raise_for_status()
+
     async def answer_callback(self, callback_id: str, notification: str = " ") -> None:
         """Подтвердить callback без изменения сообщения (безопасный ack из MAX_README)."""
         response = await self._request(

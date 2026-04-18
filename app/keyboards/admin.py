@@ -75,6 +75,12 @@ def admin_export_platforms_keyboard(platforms: list) -> list:
     return rows
 
 
+def admin_export_offers_keyboard(offers: list, platform_id: int) -> list:
+    rows = [[_btn(o.name, f"admin:export_offer:{o.id}")] for o in offers]
+    rows.append([_btn("🔙 Назад", "admin:export")])
+    return rows
+
+
 def build_keyboard_attachment(buttons: list) -> dict:
     return {
         "type": "inline_keyboard",

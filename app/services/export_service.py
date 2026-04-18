@@ -22,8 +22,11 @@ class ExportService:
                 "Дата заведения оффера",
                 "SUBID",
                 "Дата получения ссылки",
-                "ФИО",
+                "ФИО (введено)",
                 "Телефон",
+                "Имя в MAX",
+                "Никнейм в MAX",
+                "MAX user_id",
             ]
         )
         for lead in leads:
@@ -36,6 +39,9 @@ class ExportService:
                     lead.issued_at.isoformat(sep=" ", timespec="seconds"),
                     lead.full_name,
                     lead.phone,
+                    lead.max_name or "",
+                    f"@{lead.max_username}" if lead.max_username else "",
+                    lead.user_id,
                 ]
             )
 

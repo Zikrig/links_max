@@ -1,4 +1,5 @@
 import logging
+import secrets as _secrets
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from sqlalchemy.orm import Session
@@ -6,11 +7,12 @@ from sqlalchemy.orm import Session
 from app import fsm
 from app.config import Settings, get_settings
 from app.db.database import get_db
-from app.db.models import Scenario
+from app.db.models import Offer, Scenario
 from app.db.repo import Repo
 from app.keyboards.admin import (
     admin_bot_links_keyboard,
     admin_channels_keyboard,
+    admin_export_offers_keyboard,
     admin_export_platforms_keyboard,
     admin_main_keyboard,
     admin_offer_select_platform_keyboard,
@@ -20,7 +22,16 @@ from app.keyboards.admin import (
     admin_scenario_view_keyboard,
     admin_scenarios_keyboard,
 )
+from app.keyboards.user import (
+    user_card_keyboard,
+    user_channels_keyboard,
+    user_consent_keyboard,
+    user_start_keyboard,
+)
 from app.max_api import MaxApiClient, RateLimitError
+from app.services.export_service import ExportService
+from app.services.link_builder import build_offer_link
+from app.validators import validate_full_name, validate_phone
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
@@ -30,28 +41,27 @@ def _get_cached_settings() -> Settings:
     return get_settings()
 
 
-@router.get("/health")
-def health():
-    return {"ok": True}
+# ---------------------------------------------------------------------------
+# Парсинг входящего события
+# ---------------------------------------------------------------------------
 
-
-@router.get("/wh_links_8081")
-def webhook_info():
-    return {
-        "ok": True,
-        "webhook": True,
-        "detail": "MAX отправляет события POST-запросом на этот endpoint.",
-    }
-
-
-def _extract_event(payload: dict) -> tuple[int, str, str, str]:
-    """Возвращает (user_id, text, update_type, callback_id)."""
+def _extract_event(payload: dict) -> tuple[int, str, str, str, str, str]:
+    """Возвращает (user_id, text, update_type, callback_id, max_name, max_username)."""
     update_type = payload.get("update_type", "")
+
     if update_type == "message_created":
         msg = payload.get("message", {}) or {}
         sender = msg.get("sender", {}) or {}
         body = msg.get("body", {}) or {}
-        return int(sender.get("user_id") or 0), str(body.get("text", "")).strip(), update_type, ""
+        return (
+            int(sender.get("user_id") or 0),
+            str(body.get("text", "")).strip(),
+            update_type,
+            "",
+            str(sender.get("name", "") or ""),
+            str(sender.get("username", "") or ""),
+        )
+
     if update_type == "message_callback":
         cb = payload.get("callback", {}) or {}
         user = cb.get("user", {}) or {}
@@ -60,27 +70,174 @@ def _extract_event(payload: dict) -> tuple[int, str, str, str]:
             str(cb.get("payload", "")).strip(),
             update_type,
             str(cb.get("callback_id", "")),
+            str(user.get("name", "") or ""),
+            str(user.get("username", "") or ""),
         )
+
     if update_type == "bot_started":
         msg = payload.get("message", {}) or {}
         sender = msg.get("sender", {}) or {}
-        return int(sender.get("user_id") or 0), "/start", update_type, ""
-    return int(payload.get("user_id", 0)), str(payload.get("text", "")).strip(), update_type, ""
+        return (
+            int(sender.get("user_id") or 0),
+            "/start",
+            update_type,
+            "",
+            str(sender.get("name", "") or ""),
+            str(sender.get("username", "") or ""),
+        )
+
+    return int(payload.get("user_id", 0)), str(payload.get("text", "")).strip(), update_type, "", "", ""
 
 
 # ---------------------------------------------------------------------------
-# FSM-обработчики текстовых сообщений от админа
+# FSM: подписчик
+# ---------------------------------------------------------------------------
+
+async def _handle_user_fsm_text(
+    api: MaxApiClient, repo: Repo, user_id: int, text: str, settings: Settings
+) -> bool:
+    st = fsm.get_state(user_id)
+    if not st or not st.state.startswith("user:"):
+        return False
+
+    state = st.state
+
+    if state == "user:enter_fio":
+        if not validate_full_name(text):
+            await api.send_message(user_id, "Введите ФИО полностью (минимум имя и фамилия, например: Иванов Иван Иванович):")
+            return True
+        fsm.set_state(user_id, "user:enter_phone", st.data | {"full_name": text})
+        await api.send_message(user_id, "Введите номер мобильного телефона:")
+        return True
+
+    if state == "user:enter_phone":
+        if not validate_phone(text):
+            await api.send_message(user_id, "Введите корректный номер телефона (например: +79001234567):")
+            return True
+        data = st.data | {"phone": text}
+        fsm.set_state(user_id, "user:await_consent", data)
+        await api.send_message_with_keyboard(
+            user_id,
+            "Для получения ссылки необходимо согласиться с правилами сбора и хранения персональных данных.",
+            user_consent_keyboard(data["scenario_code"], settings.personal_data_policy_url),
+        )
+        return True
+
+    return False
+
+
+async def _issue_link(api: MaxApiClient, repo: Repo, user_id: int, data: dict) -> None:
+    scenario = repo.get_scenario_by_code(data["scenario_code"])
+    if not scenario:
+        await api.send_message(user_id, "Ошибка: сценарий не найден.")
+        return
+    try:
+        subid = repo.next_subid(offer_id=scenario.offer_id)
+    except ValueError as e:
+        await api.send_message(user_id, f"Ошибка: {e}")
+        return
+
+    final_link = build_offer_link(offer=scenario.offer, subid_value=subid)
+    repo.create_lead(
+        user_id=user_id,
+        scenario_id=scenario.id,
+        offer_id=scenario.offer_id,
+        full_name=data["full_name"],
+        phone=data["phone"],
+        subid_value=subid,
+        consent_accepted=True,
+        max_name=data.get("max_name") or None,
+        max_username=data.get("max_username") or None,
+    )
+    await api.send_message_with_keyboard(
+        user_id,
+        "Для оформления карты на сайте банка перейдите по ссылке ниже:",
+        user_card_keyboard(final_link),
+    )
+
+
+async def _handle_user_callback(
+    api: MaxApiClient, repo: Repo, user_id: int, cb_payload: str, callback_id: str,
+    max_name: str, max_username: str, settings: Settings,
+) -> None:
+    await api.answer_callback(callback_id)
+
+    if cb_payload.startswith("user:next:"):
+        scenario_code = cb_payload[len("user:next:"):]
+        scenario = repo.get_scenario_by_code(scenario_code)
+        if not scenario:
+            await api.send_message(user_id, "Сценарий не найден.")
+            return
+
+        channels = repo.list_required_channels()
+        if channels:
+            not_subscribed = []
+            for ch in channels:
+                member = await api.get_chat_member(ch.chat_id, user_id)
+                if not member:
+                    not_subscribed.append(ch)
+            if not_subscribed:
+                await api.send_message_with_keyboard(
+                    user_id,
+                    "Для продолжения необходимо подписаться на каналы:",
+                    user_channels_keyboard(not_subscribed, scenario_code),
+                )
+                return
+
+        fsm.set_state(user_id, "user:enter_fio", {
+            "scenario_code": scenario_code,
+            "max_name": max_name,
+            "max_username": max_username,
+        })
+        await api.send_message(user_id, "Введите ФИО на кого будет оформлена карта:")
+        return
+
+    if cb_payload.startswith("user:check_sub:"):
+        scenario_code = cb_payload[len("user:check_sub:"):]
+        channels = repo.list_required_channels()
+        not_subscribed = []
+        for ch in channels:
+            member = await api.get_chat_member(ch.chat_id, user_id)
+            if not member:
+                not_subscribed.append(ch)
+        if not_subscribed:
+            await api.send_message_with_keyboard(
+                user_id,
+                "Вы ещё не подписаны на все каналы:",
+                user_channels_keyboard(not_subscribed, scenario_code),
+            )
+            return
+        fsm.set_state(user_id, "user:enter_fio", {
+            "scenario_code": scenario_code,
+            "max_name": max_name,
+            "max_username": max_username,
+        })
+        await api.send_message(user_id, "Введите ФИО на кого будет оформлена карта:")
+        return
+
+    if cb_payload.startswith("user:consent:"):
+        scenario_code = cb_payload[len("user:consent:"):]
+        st = fsm.get_state(user_id)
+        if not st or st.state != "user:await_consent":
+            await api.send_message(user_id, "Сначала введите ФИО и телефон. Напишите /start для начала.")
+            return
+        data = st.data
+        fsm.clear_state(user_id)
+        await _issue_link(api, repo, user_id, data)
+        return
+
+
+# ---------------------------------------------------------------------------
+# FSM: админ — текстовый ввод
 # ---------------------------------------------------------------------------
 
 async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, text: str) -> bool:
-    """Возвращает True если сообщение было обработано FSM."""
     st = fsm.get_state(user_id)
     if not st:
         return False
 
     state = st.state
 
-    # --- Платформа ---
     if state == "platform_add":
         if not text:
             await api.send_message(user_id, "Название не может быть пустым. Введите название платформы:")
@@ -93,30 +250,23 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
         )
         return True
 
-    # --- Оффер: шаг 1 — название ---
     if state == "offer_add_name":
-        fsm.update_data(user_id, name=text)
         fsm.set_state(user_id, "offer_add_link_prefix", st.data | {"name": text})
         await api.send_message(user_id, "Введите первую часть реф. ссылки до SUBID\n(например: https://trckcp.com/dl/OrvoJLhNcSbf/97/?):")
         return True
 
-    # --- Оффер: шаг 2 — link_prefix ---
     if state == "offer_add_link_prefix":
-        fsm.update_data(user_id, link_prefix=text)
         fsm.set_state(user_id, "offer_add_subid_static", st.data | {"link_prefix": text})
         await api.send_message(user_id, "Введите неизменяемую часть SUBID\n(например: sub_id1=):")
         return True
 
-    # --- Оффер: шаг 3 — subid_static_part ---
     if state == "offer_add_subid_static":
-        fsm.update_data(user_id, subid_static_part=text)
         fsm.set_state(user_id, "offer_add_link_suffix", st.data | {"subid_static_part": text})
         await api.send_message(user_id, "Введите финальную часть ссылки после SUBID\n(например: &erid=2SDnjcLekU9):")
         return True
 
-    # --- Оффер: шаг 4 — link_suffix → создать оффер ---
     if state == "offer_add_link_suffix":
-        data = st.data | {"link_suffix": text}
+        data = st.data
         fsm.clear_state(user_id)
         try:
             repo.create_offer(
@@ -134,13 +284,11 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
             await api.send_message(user_id, f"Ошибка создания оффера: {e}")
         return True
 
-    # --- Канал: шаг 1 — название ---
     if state == "channel_add_title":
         fsm.set_state(user_id, "channel_add_id", {"title": text})
         await api.send_message(user_id, "Введите chat_id канала\n(отрицательное число, например: -1001234567890):")
         return True
 
-    # --- Канал: шаг 2 — chat_id ---
     if state == "channel_add_id":
         try:
             chat_id = int(text)
@@ -151,7 +299,6 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
         await api.send_message(user_id, "Введите ссылку-приглашение в канал\n(или напишите «-» чтобы пропустить):")
         return True
 
-    # --- Канал: шаг 3 — invite_link → создать ---
     if state == "channel_add_link":
         invite_link = None if text == "-" else text
         data = st.data
@@ -170,25 +317,21 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
             await api.send_message(user_id, f"Ошибка добавления канала: {e}")
         return True
 
-    # --- Сценарий: шаг 1 — title ---
     if state == "scenario_add_title":
         fsm.set_state(user_id, "scenario_add_description", st.data | {"title": text})
         await api.send_message(user_id, "Введите описание акции (текст, который увидит подписчик):")
         return True
 
-    # --- Сценарий: шаг 2 — description ---
     if state == "scenario_add_description":
         fsm.set_state(user_id, "scenario_add_image", st.data | {"description": text})
         await api.send_message(user_id, "Введите ссылку на картинку акции\n(или «-» чтобы пропустить):")
         return True
 
-    # --- Сценарий: шаг 3 — image_url → создать ---
     if state == "scenario_add_image":
         image_url = None if text == "-" else text
         data = st.data
         fsm.clear_state(user_id)
         try:
-            import secrets as _secrets
             code = f"sc{_secrets.token_hex(4)}"
             scenario = repo.create_scenario(
                 offer_id=data["offer_id"],
@@ -217,7 +360,7 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
 
 
 # ---------------------------------------------------------------------------
-# Callback-обработчики кнопок админки
+# Callback-обработчики: admin
 # ---------------------------------------------------------------------------
 
 async def _handle_admin_callback(
@@ -387,7 +530,33 @@ async def _handle_admin_callback(
 
     if cb_payload.startswith("admin:export_platform:"):
         platform_id = int(cb_payload.split(":")[-1])
-        await api.send_message(user_id, f"Экспорт для платформы {platform_id} — функция в разработке.")
+        offers = repo.list_offers_for_platform(platform_id)
+        if not offers:
+            await api.send_message(user_id, "У этой платформы нет офферов с данными.")
+            return
+        await api.send_message_with_keyboard(
+            user_id, "Выберите оффер для экспорта:", admin_export_offers_keyboard(offers, platform_id)
+        )
+        return
+
+    if cb_payload.startswith("admin:export_offer:"):
+        offer_id = int(cb_payload.split(":")[-1])
+        offer = repo.db.get(Offer, offer_id)
+        if not offer:
+            await api.send_message(user_id, "Оффер не найден.")
+            return
+        await api.send_message(user_id, "⏳ Генерирую файл...")
+        try:
+            svc = ExportService(repo.db)
+            path = svc.export_leads_xlsx(platform_id=offer.platform_id, offer_id=offer_id)
+            file_bytes = path.read_bytes()
+            token = await api.upload_file(file_bytes, path.name)
+            if token:
+                await api.send_file(user_id, token, f"Экспорт: {offer.name}")
+            else:
+                await api.send_message(user_id, f"Файл создан, но загрузка в MAX не удалась.\nПуть: {path}")
+        except Exception as e:
+            await api.send_message(user_id, f"Ошибка экспорта: {e}")
         return
 
     # --- Рассылка ---
@@ -400,8 +569,22 @@ async def _handle_admin_callback(
 
 
 # ---------------------------------------------------------------------------
-# Главный обработчик webhook
+# Роуты
 # ---------------------------------------------------------------------------
+
+@router.get("/health")
+def health():
+    return {"ok": True}
+
+
+@router.get("/wh_links_8081")
+def webhook_info():
+    return {
+        "ok": True,
+        "webhook": True,
+        "detail": "MAX отправляет события POST-запросом на этот endpoint.",
+    }
+
 
 @router.post("/wh_links_8081")
 async def handle_max_webhook(
@@ -422,7 +605,7 @@ async def handle_max_webhook(
     if not isinstance(payload, dict):
         return Response(status_code=400)
 
-    user_id, text, update_type, callback_id = _extract_event(payload)
+    user_id, text, update_type, callback_id, max_name, max_username = _extract_event(payload)
     logger.info("Webhook update_type=%r user_id=%r text=%r", update_type, user_id, text)
 
     api = MaxApiClient(settings.bot_token)
@@ -433,9 +616,11 @@ async def handle_max_webhook(
         repo = Repo(db)
         is_admin = user_id in settings.admin_user_ids
 
-        # --- Callback от inline-кнопок ---
+        # --- Callbacks ---
         if update_type == "message_callback":
-            if is_admin and text.startswith("admin:"):
+            if text.startswith("user:"):
+                await _handle_user_callback(api, repo, user_id, text, callback_id, max_name, max_username, settings)
+            elif is_admin and text.startswith("admin:"):
                 await _handle_admin_callback(api, repo, user_id, text, callback_id)
             else:
                 if callback_id:
@@ -446,7 +631,13 @@ async def handle_max_webhook(
         if update_type not in ("message_created", "bot_started", ""):
             return Response(status_code=200)
 
-        # Проверяем FSM-состояние у админа (ввод данных через диалог)
+        # FSM: подписчик
+        if update_type == "message_created":
+            handled = await _handle_user_fsm_text(api, repo, user_id, text, settings)
+            if handled:
+                return Response(status_code=200)
+
+        # FSM: admin-ввод
         if is_admin and update_type == "message_created":
             handled = await _handle_admin_fsm_text(api, repo, user_id, text)
             if handled:
@@ -464,13 +655,21 @@ async def handle_max_webhook(
             parts = text.split(maxsplit=1)
             scenario_code = parts[1] if len(parts) > 1 else ""
             scenario = repo.get_scenario_by_code(scenario_code) if scenario_code else None
-            if scenario:
-                await api.send_message(user_id, scenario.description or scenario.title)
-            else:
+            if not scenario:
                 await api.send_message(user_id, "Сценарий не найден. Используйте корректную ссылку.")
+                return Response(status_code=200)
+
+            fsm.set_state(user_id, "user:scenario_started", {
+                "scenario_code": scenario_code,
+                "max_name": max_name,
+                "max_username": max_username,
+            })
+            msg = scenario.description or scenario.title
+            if scenario.image_url:
+                msg = f"{scenario.image_url}\n\n{msg}"
+            await api.send_message_with_keyboard(user_id, msg, user_start_keyboard(scenario_code))
             return Response(status_code=200)
 
-        # Молчим на всё остальное
         return Response(status_code=200)
 
     except RateLimitError as exc:
@@ -479,7 +678,7 @@ async def handle_max_webhook(
             await api.client.post(
                 "/messages",
                 params={"user_id": user_id} if user_id > 0 else {"chat_id": user_id},
-                json={"text": "⚠️ MAX API временно недоступен (rate limit). Попробуйте ещё раз через несколько минут."},
+                json={"text": "⚠️ MAX API временно недоступен (rate limit). Попробуйте через несколько минут."},
             )
         except Exception:
             pass
