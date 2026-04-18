@@ -93,6 +93,12 @@ class MaxApiClient:
             "attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}],
         }
         response = await self._request("POST", "/messages", params=params, json=payload)
+        if response.status_code >= 400:
+            logger.warning(
+                "POST /messages keyboard failed %s: %s",
+                response.status_code,
+                (response.text or "")[:800],
+            )
         response.raise_for_status()
         return response.json().get("message")
 

@@ -1,5 +1,5 @@
 def _btn_callback(text: str, payload: str) -> dict:
-    return {"type": "callback", "text": text, "payload": payload}
+    return {"type": "callback", "text": text, "payload": payload, "intent": "default"}
 
 
 def _btn_link(text: str, url: str) -> dict:

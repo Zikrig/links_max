@@ -37,7 +37,7 @@ from app.keyboards.user import (
 )
 from app.max_api import MaxApiClient, RateLimitError
 from app.services.export_service import ExportService
-from app.services.link_builder import build_offer_link
+from app.services.link_builder import build_offer_link, offer_produces_valid_links
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
@@ -155,6 +155,14 @@ async def _issue_link(
     if not scenario:
         await api.send_message(user_id, "Ошибка: сценарий не найден.")
         return
+    if not offer_produces_valid_links(scenario.offer):
+        await api.send_message(
+            user_id,
+            "Ошибка: у оффера не задана полная ссылка (должна начинаться с https://). "
+            "Укажите основной URL оффера в админке.",
+        )
+        return
+
     try:
         subid = repo.next_subid(offer_id=scenario.offer_id)
     except ValueError as e:
@@ -1165,6 +1173,7 @@ async def handle_max_webhook(
             if scenario.description:
                 parts.append(scenario.description)
             msg = "\n\n".join(parts) if parts else scenario.title
+            msg = (msg or "").strip() or (scenario.title or "Акция")
 
             if scenario.check_subscription:
                 # Показываем материал + список каналов + «Я подписался»
@@ -1179,6 +1188,13 @@ async def handle_max_webhook(
                     await _issue_link(api, repo, ev.user_id, scenario_code, ev.max_name, ev.max_username)
             else:
                 # Без проверки подписки — генерируем ссылку сразу, показываем в том же сообщении
+                if not offer_produces_valid_links(scenario.offer):
+                    await api.send_message(
+                        ev.user_id,
+                        "Ошибка: у оффера не задана полная ссылка (должна начинаться с https://). "
+                        "Укажите основной URL оффера в админке.",
+                    )
+                    return Response(status_code=200)
                 try:
                     subid = repo.next_subid(offer_id=scenario.offer_id)
                     final_link = build_offer_link(offer=scenario.offer, subid_value=subid)
