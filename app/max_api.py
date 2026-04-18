@@ -12,6 +12,25 @@ logger = logging.getLogger(__name__)
 _RATE_LIMIT_TIMEOUT = 300.0  # 5 минут
 
 
+def _token_from_max_upload_response(body: dict) -> str | None:
+    """
+    После POST на upload URL MAX может вернуть token в корне или вложить в
+    photos / files / images: {"photos": {"<id>": {"token": "..."}}}.
+    """
+    t = body.get("token")
+    if t:
+        return str(t).strip()
+    for key in ("photos", "files", "images"):
+        block = body.get(key)
+        if isinstance(block, dict):
+            for item in block.values():
+                if isinstance(item, dict):
+                    tok = item.get("token")
+                    if tok:
+                        return str(tok).strip()
+    return None
+
+
 class RateLimitError(Exception):
     """MAX API вернул 429 и исчерпан лимит ожидания."""
 
@@ -235,7 +254,7 @@ class MaxApiClient:
                 return None
             if not isinstance(body, dict):
                 return None
-            token = body.get("token")
+            token = _token_from_max_upload_response(body)
             if not token:
                 logger.warning("Image upload OK but no token: %s", (up_resp.text or "")[:800])
             return token
@@ -661,7 +680,7 @@ class MaxApiClient:
                 return None
             if not isinstance(body, dict):
                 return None
-            token = body.get("token")
+            token = _token_from_max_upload_response(body)
             if not token:
                 logger.warning("Upload OK but no token in body: %s", (up_resp.text or "")[:800])
             return token
