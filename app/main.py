@@ -53,6 +53,16 @@ async def lifespan(_: FastAPI):
     max_api = MaxApiClient(settings.bot_token)
     subscribed = False
     webhook_url = ""
+    if not settings.bot_username:
+        me = await max_api.get_me()
+        logger.info("Bot /me response: %s", me)
+        username = me.get("username") or me.get("login") or me.get("name") or ""
+        if username:
+            settings.bot_username = username
+            logger.info("Bot username resolved from API: %s", username)
+        else:
+            logger.warning("Could not resolve bot username from /me: %s", me)
+
     try:
         webhook_url, _webhook_path = settings.normalized_webhook
         await max_api.subscribe_webhook(webhook_url, settings.webhook_secret)
@@ -72,7 +82,6 @@ async def lifespan(_: FastAPI):
         await max_api.close()
 
 
-logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
