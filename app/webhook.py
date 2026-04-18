@@ -74,9 +74,10 @@ class Event:
     text: str = ""
     update_type: str = ""
     callback_id: str = ""
-    message_id: str = ""   # mid текущего сообщения (для edit)
+    message_id: str = ""
     max_name: str = ""
     max_username: str = ""
+    attachments: list = field(default_factory=list)  # вложения сообщения (фото и др.)
 
 
 def _extract_event(payload: dict) -> Event:
@@ -86,6 +87,7 @@ def _extract_event(payload: dict) -> Event:
         msg = payload.get("message", {}) or {}
         sender = msg.get("sender", {}) or {}
         body = msg.get("body", {}) or {}
+        attachments = body.get("attachments", []) or []
         return Event(
             user_id=int(sender.get("user_id") or 0),
             text=str(body.get("text", "")).strip(),
@@ -93,6 +95,7 @@ def _extract_event(payload: dict) -> Event:
             message_id=str(body.get("mid", "") or ""),
             max_name=str(sender.get("name", "") or ""),
             max_username=str(sender.get("username", "") or ""),
+            attachments=attachments,
         )
 
     if update_type == "message_callback":
@@ -214,7 +217,9 @@ async def _handle_user_callback(
 # FSM: админ — текстовый ввод
 # ---------------------------------------------------------------------------
 
-async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, text: str) -> bool:
+async def _handle_admin_fsm_text(
+    api: MaxApiClient, repo: Repo, user_id: int, text: str, attachments: list | None = None
+) -> bool:
     st = fsm.get_state(user_id)
     if not st:
         return False
@@ -357,17 +362,28 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             fsm.clear_state(user_id)
-            await api.send_message(user_id, "Сценарий не найден.")
             return True
-        image_url = None if text == "-" else text
+
+        # Ищем фото в вложениях сообщения
+        image_url: str | None = None
+        for att in (attachments or []):
+            if att.get("type") in ("image", "photo"):
+                pld = att.get("payload", {})
+                image_url = pld.get("url") or pld.get("photo_url") or pld.get("token")
+                if image_url:
+                    break
+
+        # Если фото не прислали — считаем текст URL-ом
+        if image_url is None:
+            if not text:
+                return True  # пустое сообщение — игнорируем
+            image_url = text
+
         repo.update_scenario_field(scenario_id, image_url=image_url)
         fsm.clear_state(user_id)
         scenario = repo.db.get(Scenario, scenario_id)
         channels = repo.list_scenario_channels(scenario_id)
-        await _reply(
-            "✅ Картинка обновлена." if image_url else "✅ Картинка удалена.",
-            admin_scenario_settings_keyboard(scenario, channels),
-        )
+        await _reply("✅ Картинка сохранена.", admin_scenario_settings_keyboard(scenario, channels))
         return True
 
     if state == "scenario_edit_text":
@@ -375,17 +391,14 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             fsm.clear_state(user_id)
-            await api.send_message(user_id, "Сценарий не найден.")
             return True
-        description = None if text == "-" else text
-        repo.update_scenario_field(scenario_id, description=description)
+        if not text:
+            return True  # пустое — игнорируем
+        repo.update_scenario_field(scenario_id, description=text)
         fsm.clear_state(user_id)
         scenario = repo.db.get(Scenario, scenario_id)
         channels = repo.list_scenario_channels(scenario_id)
-        await _reply(
-            "✅ Текст обновлён." if description else "✅ Текст удалён.",
-            admin_scenario_settings_keyboard(scenario, channels),
-        )
+        await _reply("✅ Текст сохранён.", admin_scenario_settings_keyboard(scenario, channels))
         return True
 
     if state == "scenario_channel_add":
@@ -684,12 +697,21 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        fsm.set_state(user_id, "scenario_edit_image", {"scenario_id": scenario_id})
-        cur = f"\nТекущая: {scenario.image_url}" if scenario.image_url else "\nСейчас не задана."
-        await _edit_then_ask(
-            "Картинка сценария:",
-            f"Введите URL картинки (JPG/PNG){cur}\nИли «-» чтобы удалить:"
+        fsm.set_state(user_id, "scenario_edit_image", {"scenario_id": scenario_id, "_msg_id": message_id})
+        cur = f"\nТекущая картинка: {scenario.image_url}" if scenario.image_url else ""
+        await _edit(
+            f"📷 Отправьте фото сюда в чат или введите URL картинки.{cur}",
+            [[{"type": "callback", "text": "⏭ Пропустить", "payload": f"admin:scenario_skip_image:{scenario_id}"}]],
         )
+        return
+
+    if cb_payload.startswith("admin:scenario_skip_image:"):
+        scenario_id = int(cb_payload.split(":")[-1])
+        fsm.clear_state(user_id)
+        repo.update_scenario_field(scenario_id, image_url=None)
+        scenario = repo.db.get(Scenario, scenario_id)
+        channels = repo.list_scenario_channels(scenario_id)
+        await _edit("✅ Картинка убрана.", admin_scenario_settings_keyboard(scenario, channels))
         return
 
     if cb_payload.startswith("admin:scenario_set_text:"):
@@ -697,12 +719,21 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        fsm.set_state(user_id, "scenario_edit_text", {"scenario_id": scenario_id})
-        cur = f"\nТекущий:\n{scenario.description}" if scenario.description else "\nСейчас не задан."
-        await _edit_then_ask(
-            "Текст для подписчика:",
-            f"Введите текст акции, который увидит подписчик.{cur}\nИли «-» чтобы удалить:"
+        fsm.set_state(user_id, "scenario_edit_text", {"scenario_id": scenario_id, "_msg_id": message_id})
+        cur = f"\n\nТекущий текст:\n{scenario.description}" if scenario.description else ""
+        await _edit(
+            f"📝 Введите текст акции, который увидит подписчик.{cur}",
+            [[{"type": "callback", "text": "⏭ Пропустить", "payload": f"admin:scenario_skip_text:{scenario_id}"}]],
         )
+        return
+
+    if cb_payload.startswith("admin:scenario_skip_text:"):
+        scenario_id = int(cb_payload.split(":")[-1])
+        fsm.clear_state(user_id)
+        repo.update_scenario_field(scenario_id, description=None)
+        scenario = repo.db.get(Scenario, scenario_id)
+        channels = repo.list_scenario_channels(scenario_id)
+        await _edit("✅ Текст убран.", admin_scenario_settings_keyboard(scenario, channels))
         return
 
     if cb_payload.startswith("admin:scenario_toggle_sub:"):
@@ -1037,7 +1068,7 @@ async def handle_max_webhook(
 
         # FSM: admin-ввод
         if is_admin and ev.update_type == "message_created":
-            handled = await _handle_admin_fsm_text(api, repo, ev.user_id, ev.text)
+            handled = await _handle_admin_fsm_text(api, repo, ev.user_id, ev.text, ev.attachments)
             if handled:
                 return Response(status_code=200)
 
