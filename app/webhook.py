@@ -225,13 +225,13 @@ async def _handle_admin_fsm_text(
 
     state = st.state
     msg_id: str = st.data.get("_msg_id", "")
+    msg_text: str = st.data.get("_msg_text", "")
 
     async def _reply(reply_text: str, buttons: list | None = None) -> None:
-        """Если есть сохранённый msg_id — редактируем его, иначе новое сообщение."""
-        if msg_id and buttons is not None:
-            await api.edit_message(msg_id, reply_text, buttons)
-        else:
-            await api.send_message_with_keyboard(user_id, reply_text, buttons or [])
+        """Убрать клавиатуру у предыдущего сообщения (если известен его текст), отправить новое."""
+        if msg_id and msg_text:
+            await api.edit_message(msg_id, msg_text, buttons=None)
+        await api.send_message_with_keyboard(user_id, reply_text, buttons or [])
 
     if state == "platform_add":
         if not text:
@@ -357,19 +357,30 @@ async def _handle_admin_fsm_text(
             fsm.clear_state(user_id)
             return True
 
-        # Ищем фото в вложениях сообщения
+        # Ищем фото во вложениях сообщения
         image_url: str | None = None
+        if attachments:
+            logger.debug("scenario_edit_image attachments: %s", attachments)
         for att in (attachments or []):
-            if att.get("type") in ("image", "photo"):
-                pld = att.get("payload", {})
-                image_url = pld.get("url") or pld.get("photo_url") or pld.get("token")
-                if image_url:
-                    break
+            att_type = att.get("type", "")
+            pld = att.get("payload", {}) or {}
+            # MAX API может слать тип "image", "photo" или другие
+            url_candidate = pld.get("url") or pld.get("photo_url")
+            if url_candidate:
+                image_url = url_candidate
+                break
+            # Если тип явно графический — берём token как запасной вариант
+            if att_type in ("image", "photo") and pld.get("token"):
+                image_url = pld["token"]
+                break
 
         # Если фото не прислали — считаем текст URL-ом
         if image_url is None:
             if not text:
-                return True  # пустое сообщение — игнорируем
+                if attachments:
+                    # Вложения есть, но URL не распознан — сообщаем о проблеме
+                    await api.send_message(user_id, "⚠️ Не удалось получить URL картинки. Попробуйте отправить URL текстом.")
+                return True  # пустое сообщение без вложений — игнорируем
             image_url = text
 
         repo.update_scenario_field(scenario_id, image_url=image_url)
@@ -499,12 +510,12 @@ async def _handle_admin_callback(
             ok = await api.answer_callback_with_edit(callback_id, text_edit, buttons=None)
             if ok:
                 _acked = True
-                fsm.update_data(user_id, _msg_id=message_id)
+                fsm.update_data(user_id, _msg_id=message_id, _msg_text=text_edit)
                 await api.send_message(user_id, question)
                 return
         if message_id:
             await api.edit_message(message_id, text_edit, buttons=None)
-            fsm.update_data(user_id, _msg_id=message_id)
+            fsm.update_data(user_id, _msg_id=message_id, _msg_text=text_edit)
         await _ack()
         await api.send_message(user_id, question)
 
@@ -698,12 +709,14 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        fsm.set_state(user_id, "scenario_edit_image", {"scenario_id": scenario_id, "_msg_id": message_id})
         cur = f"\nТекущая картинка: {scenario.image_url}" if scenario.image_url else ""
-        await _edit(
-            f"📷 Отправьте фото сюда в чат или введите URL картинки.{cur}",
-            [[{"type": "callback", "text": "⏭ Пропустить", "payload": f"admin:scenario_skip_image:{scenario_id}"}]],
-        )
+        msg_text = f"📷 Отправьте фото сюда в чат или введите URL картинки.{cur}"
+        fsm.set_state(user_id, "scenario_edit_image", {
+            "scenario_id": scenario_id,
+            "_msg_id": message_id,
+            "_msg_text": msg_text,
+        })
+        await _edit(msg_text, [[{"type": "callback", "text": "⏭ Пропустить", "payload": f"admin:scenario_skip_image:{scenario_id}"}]])
         return
 
     if cb_payload.startswith("admin:scenario_skip_image:"):
@@ -720,12 +733,14 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        fsm.set_state(user_id, "scenario_edit_text", {"scenario_id": scenario_id, "_msg_id": message_id})
         cur = f"\n\nТекущий текст:\n{scenario.description}" if scenario.description else ""
-        await _edit(
-            f"📝 Введите текст акции, который увидит подписчик.{cur}",
-            [[{"type": "callback", "text": "⏭ Пропустить", "payload": f"admin:scenario_skip_text:{scenario_id}"}]],
-        )
+        msg_text = f"📝 Введите текст акции, который увидит подписчик.{cur}"
+        fsm.set_state(user_id, "scenario_edit_text", {
+            "scenario_id": scenario_id,
+            "_msg_id": message_id,
+            "_msg_text": msg_text,
+        })
+        await _edit(msg_text, [[{"type": "callback", "text": "⏭ Пропустить", "payload": f"admin:scenario_skip_text:{scenario_id}"}]])
         return
 
     if cb_payload.startswith("admin:scenario_skip_text:"):
