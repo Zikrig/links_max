@@ -13,7 +13,7 @@ from app.webhook import router as webhook_router
 
 logger = logging.getLogger(__name__)
 
-_MIGRATIONS: list[str | list[str]] = [
+_MIGRATIONS = [
     "ALTER TABLE leads ADD COLUMN max_name VARCHAR(255)",
     "ALTER TABLE leads ADD COLUMN max_username VARCHAR(120)",
     "ALTER TABLE offers ADD COLUMN base_url TEXT DEFAULT ''",
@@ -32,24 +32,6 @@ _MIGRATIONS: list[str | list[str]] = [
         "invite_link VARCHAR(255)"
         ")"
     ),
-    # Сделать scenarios.description nullable (SQLite не умеет ALTER COLUMN)
-    [
-        "CREATE TABLE IF NOT EXISTS scenarios_new ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "offer_id INTEGER NOT NULL REFERENCES offers(id), "
-        "code VARCHAR(80) NOT NULL UNIQUE, "
-        "title VARCHAR(200) NOT NULL, "
-        "description TEXT, "
-        "image_url TEXT, "
-        "check_subscription BOOLEAN NOT NULL DEFAULT 0, "
-        "created_at DATETIME"
-        ")",
-        "INSERT OR IGNORE INTO scenarios_new "
-        "SELECT id, offer_id, code, title, description, image_url, check_subscription, created_at "
-        "FROM scenarios",
-        "DROP TABLE scenarios",
-        "ALTER TABLE scenarios_new RENAME TO scenarios",
-    ],
 ]
 
 
