@@ -30,16 +30,14 @@ class Repo:
         self,
         platform_id: int,
         name: str,
-        link_prefix: str,
-        subid_static_part: str,
-        link_suffix: str,
+        base_url: str,
+        subid_param: str,
     ) -> models.Offer:
         offer = models.Offer(
             platform_id=platform_id,
             name=name,
-            link_prefix=link_prefix,
-            subid_static_part=subid_static_part,
-            link_suffix=link_suffix,
+            base_url=base_url,
+            subid_param=subid_param,
         )
         self.db.add(offer)
         self.db.commit()

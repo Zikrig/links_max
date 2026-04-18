@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 _MIGRATIONS = [
     "ALTER TABLE leads ADD COLUMN max_name VARCHAR(255)",
     "ALTER TABLE leads ADD COLUMN max_username VARCHAR(120)",
+    "ALTER TABLE offers ADD COLUMN base_url TEXT DEFAULT ''",
+    "ALTER TABLE offers ADD COLUMN subid_param VARCHAR(80) DEFAULT ''",
 ]
 
 

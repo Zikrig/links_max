@@ -23,9 +23,8 @@ class Offer(Base):
     platform_id: Mapped[int] = mapped_column(ForeignKey("platforms.id"), index=True)
     name: Mapped[str] = mapped_column(String(255), index=True)
     created_date: Mapped[Date] = mapped_column(Date, default=datetime.utcnow().date)
-    link_prefix: Mapped[str] = mapped_column(Text)
-    subid_static_part: Mapped[str] = mapped_column(String(80))
-    link_suffix: Mapped[str] = mapped_column(Text)
+    base_url: Mapped[str] = mapped_column(Text, default="")
+    subid_param: Mapped[str] = mapped_column(String(80), default="")
     next_subid: Mapped[int] = mapped_column(Integer, default=1)
 
     platform: Mapped["Platform"] = relationship(back_populates="offers")

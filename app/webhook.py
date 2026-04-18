@@ -16,7 +16,9 @@ from app.keyboards.admin import (
     admin_export_platforms_keyboard,
     admin_main_keyboard,
     admin_offer_select_platform_keyboard,
+    admin_offer_view_keyboard,
     admin_offers_keyboard,
+    admin_platform_view_keyboard,
     admin_platforms_keyboard,
     admin_scenario_select_offer_keyboard,
     admin_scenario_view_keyboard,
@@ -256,34 +258,43 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
         return True
 
     if state == "offer_add_name":
-        fsm.set_state(user_id, "offer_add_link_prefix", st.data | {"name": text})
-        await api.send_message(user_id, "Введите первую часть реф. ссылки до SUBID\n(например: https://trckcp.com/dl/OrvoJLhNcSbf/97/?):")
+        fsm.set_state(user_id, "offer_add_base_url", st.data | {"name": text})
+        await api.send_message(
+            user_id,
+            "Введите основную ссылку оффера целиком\n"
+            "(например: https://trckcp.com/dl/OrvoJLhNcSbf/97/?erid=2SDnjcLekU9):"
+        )
         return True
 
-    if state == "offer_add_link_prefix":
-        fsm.set_state(user_id, "offer_add_subid_static", st.data | {"link_prefix": text})
-        await api.send_message(user_id, "Введите неизменяемую часть SUBID\n(например: sub_id1=):")
+    if state == "offer_add_base_url":
+        fsm.set_state(user_id, "offer_add_subid_param", st.data | {"base_url": text})
+        await api.send_message(
+            user_id,
+            "Введите имя переменной для SUBID\n"
+            "(например: sub_id1)\n\n"
+            "Бот сам добавит & или ? перед ней в зависимости от ссылки."
+        )
         return True
 
-    if state == "offer_add_subid_static":
-        fsm.set_state(user_id, "offer_add_link_suffix", st.data | {"subid_static_part": text})
-        await api.send_message(user_id, "Введите финальную часть ссылки после SUBID\n(например: &erid=2SDnjcLekU9):")
-        return True
-
-    if state == "offer_add_link_suffix":
+    if state == "offer_add_subid_param":
         data = st.data
         fsm.clear_state(user_id)
+        subid_param = text.strip().lstrip("?&").strip()
         try:
             repo.create_offer(
                 platform_id=data["platform_id"],
                 name=data["name"],
-                link_prefix=data["link_prefix"],
-                subid_static_part=data["subid_static_part"],
-                link_suffix=text,
+                base_url=data["base_url"],
+                subid_param=subid_param,
             )
-            offers = repo.list_offers()
+            platform_id = data["platform_id"]
+            offers = repo.list_offers_for_platform(platform_id)
+            example_link = data["base_url"]
+            sep = "&" if "?" in example_link else "?"
             await api.send_message_with_keyboard(
-                user_id, f"✅ Оффер «{data['name']}» добавлен.", admin_offers_keyboard(offers)
+                user_id,
+                f"✅ Оффер «{data['name']}» добавлен.\n\nПример ссылки:\n{example_link}{sep}{subid_param}=0001",
+                admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}"),
             )
         except Exception as e:
             await api.send_message(user_id, f"Ошибка создания оффера: {e}")
@@ -391,6 +402,29 @@ async def _handle_admin_callback(
         await api.send_message(user_id, "Введите название новой платформы:")
         return
 
+    if cb_payload.startswith("admin:platform_view:"):
+        platform_id = int(cb_payload.split(":")[-1])
+        from app.db.models import Platform as _Platform
+        platform = repo.db.get(_Platform, platform_id)
+        if not platform:
+            await api.send_message(user_id, "Платформа не найдена.")
+            return
+        offers = repo.list_offers_for_platform(platform_id)
+        offers_text = f"\nОфферов: {len(offers)}" if offers else "\nОфферов пока нет."
+        await api.send_message_with_keyboard(
+            user_id, f"Платформа: {platform.name}{offers_text}", admin_platform_view_keyboard(platform_id)
+        )
+        return
+
+    if cb_payload.startswith("admin:platform_offers:"):
+        platform_id = int(cb_payload.split(":")[-1])
+        offers = repo.list_offers_for_platform(platform_id)
+        text = "Офферы платформы:" if offers else "Офферов пока нет."
+        await api.send_message_with_keyboard(
+            user_id, text, admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}")
+        )
+        return
+
     if cb_payload.startswith("admin:platform_delete:"):
         platform_id = int(cb_payload.split(":")[-1])
         try:
@@ -405,7 +439,7 @@ async def _handle_admin_callback(
     if cb_payload == "admin:offers":
         fsm.clear_state(user_id)
         offers = repo.list_offers()
-        text = "Офферы:" if offers else "Офферов пока нет."
+        text = "Все офферы:" if offers else "Офферов пока нет."
         await api.send_message_with_keyboard(user_id, text, admin_offers_keyboard(offers))
         return
 
@@ -425,12 +459,35 @@ async def _handle_admin_callback(
         await api.send_message(user_id, "Введите название оффера (карты):")
         return
 
+    if cb_payload.startswith("admin:offer_view:"):
+        offer_id = int(cb_payload.split(":")[-1])
+        offer = repo.db.get(Offer, offer_id)
+        if not offer:
+            await api.send_message(user_id, "Оффер не найден.")
+            return
+        sep = "&" if "?" in offer.base_url else "?"
+        example = f"{offer.base_url}{sep}{offer.subid_param}=0001"
+        await api.send_message_with_keyboard(
+            user_id,
+            f"Оффер: {offer.name}\nПример ссылки:\n{example}",
+            admin_offer_view_keyboard(offer_id, offer.platform_id),
+        )
+        return
+
     if cb_payload.startswith("admin:offer_delete:"):
         offer_id = int(cb_payload.split(":")[-1])
+        offer = repo.db.get(Offer, offer_id)
+        platform_id = offer.platform_id if offer else None
         try:
             repo.delete_offer(offer_id)
-            offers = repo.list_offers()
-            await api.send_message_with_keyboard(user_id, "Оффер удалён.", admin_offers_keyboard(offers))
+            if platform_id:
+                offers = repo.list_offers_for_platform(platform_id)
+                await api.send_message_with_keyboard(
+                    user_id, "Оффер удалён.",
+                    admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}")
+                )
+            else:
+                await api.send_message(user_id, "Оффер удалён.")
         except Exception as e:
             await api.send_message(user_id, f"Ошибка удаления: {e}")
         return

@@ -15,17 +15,32 @@ def admin_main_keyboard() -> list:
 
 
 def admin_platforms_keyboard(platforms: list) -> list:
-    rows = [[_btn(f"❌ {p.name}", f"admin:platform_delete:{p.id}")] for p in platforms]
+    rows = [[_btn(p.name, f"admin:platform_view:{p.id}")] for p in platforms]
     rows.append([_btn("➕ Добавить платформу", "admin:platform_add")])
     rows.append([_btn("🔙 Назад", "admin:main")])
     return rows
 
 
-def admin_offers_keyboard(offers: list) -> list:
-    rows = [[_btn(f"❌ {o.name}", f"admin:offer_delete:{o.id}")] for o in offers]
+def admin_platform_view_keyboard(platform_id: int) -> list:
+    return [
+        [_btn("📋 Офферы платформы", f"admin:platform_offers:{platform_id}")],
+        [_btn("🗑 Удалить платформу", f"admin:platform_delete:{platform_id}")],
+        [_btn("🔙 Назад", "admin:platforms")],
+    ]
+
+
+def admin_offers_keyboard(offers: list, back_payload: str = "admin:main") -> list:
+    rows = [[_btn(o.name, f"admin:offer_view:{o.id}")] for o in offers]
     rows.append([_btn("➕ Добавить оффер", "admin:offer_add")])
-    rows.append([_btn("🔙 Назад", "admin:main")])
+    rows.append([_btn("🔙 Назад", back_payload)])
     return rows
+
+
+def admin_offer_view_keyboard(offer_id: int, platform_id: int) -> list:
+    return [
+        [_btn("🗑 Удалить оффер", f"admin:offer_delete:{offer_id}")],
+        [_btn("🔙 Назад", f"admin:platform_offers:{platform_id}")],
+    ]
 
 
 def admin_scenarios_keyboard(scenarios: list) -> list:
