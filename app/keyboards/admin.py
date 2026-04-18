@@ -1,5 +1,18 @@
+PAGE_SIZE = 6
+
+
 def _btn(text: str, payload: str) -> dict:
     return {"type": "callback", "text": text, "payload": payload}
+
+
+def _nav_row(page: int, total: int, prev_payload: str, next_payload: str) -> list | None:
+    """Ряд кнопок «◀ Назад» / «▶ Далее» для пагинации, или None если не нужен."""
+    nav = []
+    if page > 0:
+        nav.append(_btn(f"◀ {page}", prev_payload))
+    if (page + 1) * PAGE_SIZE < total:
+        nav.append(_btn(f"{page + 2} ▶", next_payload))
+    return nav if nav else None
 
 
 def admin_main_keyboard() -> list:
@@ -14,8 +27,13 @@ def admin_main_keyboard() -> list:
     ]
 
 
-def admin_platforms_keyboard(platforms: list) -> list:
-    rows = [[_btn(p.name, f"admin:platform_view:{p.id}")] for p in platforms]
+def admin_platforms_keyboard(platforms: list, page: int = 0) -> list:
+    total = len(platforms)
+    items = platforms[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+    rows = [[_btn(p.name, f"admin:platform_view:{p.id}")] for p in items]
+    nav = _nav_row(page, total, f"admin:platforms:{page - 1}", f"admin:platforms:{page + 1}")
+    if nav:
+        rows.append(nav)
     rows.append([_btn("➕ Добавить платформу", "admin:platform_add")])
     rows.append([_btn("🔙 Назад", "admin:main")])
     return rows
@@ -29,8 +47,24 @@ def admin_platform_view_keyboard(platform_id: int) -> list:
     ]
 
 
-def admin_offers_keyboard(offers: list, back_payload: str = "admin:main", platform_id: int | None = None) -> list:
-    rows = [[_btn(o.name, f"admin:offer_view:{o.id}")] for o in offers]
+def admin_offers_keyboard(
+    offers: list,
+    back_payload: str = "admin:main",
+    platform_id: int | None = None,
+    page: int = 0,
+) -> list:
+    total = len(offers)
+    items = offers[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+    rows = [[_btn(o.name, f"admin:offer_view:{o.id}")] for o in items]
+    if platform_id:
+        prev_p = f"admin:platform_offers:{platform_id}:{page - 1}"
+        next_p = f"admin:platform_offers:{platform_id}:{page + 1}"
+    else:
+        prev_p = f"admin:offers:{page - 1}"
+        next_p = f"admin:offers:{page + 1}"
+    nav = _nav_row(page, total, prev_p, next_p)
+    if nav:
+        rows.append(nav)
     add_payload = f"admin:offer_add:{platform_id}" if platform_id else "admin:offer_add"
     rows.append([_btn("➕ Добавить оффер", add_payload)])
     rows.append([_btn("🔙 Назад", back_payload)])
@@ -89,8 +123,13 @@ def admin_scenario_channels_keyboard(scenario_id: int, channels: list) -> list:
     return rows
 
 
-def admin_scenarios_keyboard(scenarios: list) -> list:
-    rows = [[_btn(f"{s.code}: {s.title}", f"admin:scenario_view:{s.id}")] for s in scenarios]
+def admin_scenarios_keyboard(scenarios: list, page: int = 0) -> list:
+    total = len(scenarios)
+    items = scenarios[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+    rows = [[_btn(f"{s.code}: {s.title}", f"admin:scenario_view:{s.id}")] for s in items]
+    nav = _nav_row(page, total, f"admin:scenarios:{page - 1}", f"admin:scenarios:{page + 1}")
+    if nav:
+        rows.append(nav)
     rows.append([_btn("➕ Добавить сценарий", "admin:scenario_add")])
     rows.append([_btn("🔙 Назад", "admin:main")])
     return rows
@@ -117,8 +156,13 @@ def admin_bot_links_keyboard() -> list:
     ]
 
 
-def admin_channels_keyboard(channels: list) -> list:
-    rows = [[_btn(f"❌ {c.title}", f"admin:channel_delete:{c.id}")] for c in channels]
+def admin_channels_keyboard(channels: list, page: int = 0) -> list:
+    total = len(channels)
+    items = channels[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+    rows = [[_btn(f"❌ {c.title}", f"admin:channel_delete:{c.id}")] for c in items]
+    nav = _nav_row(page, total, f"admin:channels:{page - 1}", f"admin:channels:{page + 1}")
+    if nav:
+        rows.append(nav)
     rows.append([_btn("➕ Добавить канал", "admin:channel_add")])
     rows.append([_btn("🔙 Назад", "admin:main")])
     return rows

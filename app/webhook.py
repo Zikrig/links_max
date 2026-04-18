@@ -520,11 +520,13 @@ async def _handle_admin_callback(
         return
 
     # --- Платформы ---
-    if cb_payload == "admin:platforms":
+    if cb_payload == "admin:platforms" or (cb_payload.startswith("admin:platforms:") and cb_payload.split(":")[-1].lstrip("-").isdigit()):
         fsm.clear_state(user_id)
+        parts = cb_payload.split(":")
+        page = int(parts[2]) if len(parts) > 2 else 0
         platforms = repo.list_platforms()
         text = "Платформы:" if platforms else "Платформ пока нет."
-        await _edit(text, admin_platforms_keyboard(platforms))
+        await _edit(text, admin_platforms_keyboard(platforms, page))
         return
 
     if cb_payload == "admin:platform_add":
@@ -544,10 +546,12 @@ async def _handle_admin_callback(
         return
 
     if cb_payload.startswith("admin:platform_offers:"):
-        platform_id = int(cb_payload.split(":")[-1])
+        parts = cb_payload.split(":")
+        platform_id = int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
         offers = repo.list_offers_for_platform(platform_id)
         text = "Офферы платформы:" if offers else "Офферов пока нет."
-        await _edit(text, admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}", platform_id=platform_id))
+        await _edit(text, admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}", platform_id=platform_id, page=page))
         return
 
     if cb_payload.startswith("admin:platform_delete:"):
@@ -572,11 +576,13 @@ async def _handle_admin_callback(
         return
 
     # --- Офферы ---
-    if cb_payload == "admin:offers":
+    if cb_payload == "admin:offers" or (cb_payload.startswith("admin:offers:") and cb_payload.split(":")[-1].lstrip("-").isdigit()):
         fsm.clear_state(user_id)
+        parts = cb_payload.split(":")
+        page = int(parts[2]) if len(parts) > 2 else 0
         offers = repo.list_offers()
         text = "Все офферы:" if offers else "Офферов пока нет."
-        await _edit(text, admin_offers_keyboard(offers))
+        await _edit(text, admin_offers_keyboard(offers, page=page))
         return
 
     if cb_payload.startswith("admin:offer_add:"):
@@ -828,11 +834,13 @@ async def _handle_admin_callback(
         return
 
     # --- Сценарии ---
-    if cb_payload == "admin:scenarios":
+    if cb_payload == "admin:scenarios" or (cb_payload.startswith("admin:scenarios:") and cb_payload.split(":")[-1].lstrip("-").isdigit()):
         fsm.clear_state(user_id)
+        parts = cb_payload.split(":")
+        page = int(parts[2]) if len(parts) > 2 else 0
         scenarios = repo.list_scenarios()
         text = "Сценарии:" if scenarios else "Сценариев пока нет."
-        await _edit(text, admin_scenarios_keyboard(scenarios))
+        await _edit(text, admin_scenarios_keyboard(scenarios, page))
         return
 
     if cb_payload == "admin:scenario_add":
@@ -901,11 +909,13 @@ async def _handle_admin_callback(
         return
 
     # --- Каналы ---
-    if cb_payload == "admin:channels":
+    if cb_payload == "admin:channels" or (cb_payload.startswith("admin:channels:") and cb_payload.split(":")[-1].lstrip("-").isdigit()):
         fsm.clear_state(user_id)
+        parts = cb_payload.split(":")
+        page = int(parts[2]) if len(parts) > 2 else 0
         channels = repo.list_required_channels()
         text = "Каналы подписки:" if channels else "Каналов пока нет."
-        await _edit(text, admin_channels_keyboard(channels))
+        await _edit(text, admin_channels_keyboard(channels, page))
         return
 
     if cb_payload == "admin:channel_add":
