@@ -18,6 +18,8 @@ _MIGRATIONS = [
     "ALTER TABLE leads ADD COLUMN max_username VARCHAR(120)",
     "ALTER TABLE offers ADD COLUMN base_url TEXT DEFAULT ''",
     "ALTER TABLE offers ADD COLUMN subid_param VARCHAR(80) DEFAULT ''",
+    "ALTER TABLE scenarios ADD COLUMN channel_chat_id INTEGER",
+    "ALTER TABLE scenarios ADD COLUMN channel_title VARCHAR(200)",
 ]
 
 
@@ -58,8 +60,9 @@ async def lifespan(_: FastAPI):
         await max_api.close()
 
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
 
 app = FastAPI(title="MAX Lead Bot", lifespan=lifespan)

@@ -103,6 +103,22 @@ class MaxApiClient:
         response = await self._request("POST", "/messages", params=params, json=payload)
         response.raise_for_status()
 
+    async def check_chat_access(self, chat_id: int) -> tuple[bool, str]:
+        """Проверить доступ бота к чату. Возвращает (ok, описание)."""
+        try:
+            resp = await self._request("GET", f"/chats/{chat_id}")
+            if resp.status_code == 200:
+                data = resp.json()
+                title = data.get("title") or data.get("chat_id") or str(chat_id)
+                return True, str(title)
+            if resp.status_code == 403:
+                return False, "Бот не является участником канала/чата. Добавьте бота в канал."
+            if resp.status_code == 404:
+                return False, "Канал/чат не найден. Проверьте chat_id."
+            return False, f"Ошибка доступа: HTTP {resp.status_code}"
+        except Exception as e:
+            return False, f"Ошибка проверки: {e}"
+
     async def get_chat_member(self, chat_id: int, user_id: int) -> dict | None:
         """Проверить членство user_id в чате/канале. None = не в чате или ошибка."""
         try:

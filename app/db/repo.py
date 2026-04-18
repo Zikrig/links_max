@@ -56,7 +56,20 @@ class Repo:
             stmt = stmt.where(models.Offer.platform_id == platform_id)
         return list(self.db.scalars(stmt))
 
-    def create_scenario(self, offer_id: int, code: str, title: str, description: str, image_url: str | None) -> models.Scenario:
+    def get_scenario_for_offer(self, offer_id: int) -> models.Scenario | None:
+        return self.db.scalar(select(models.Scenario).where(models.Scenario.offer_id == offer_id))
+
+    def update_scenario_field(self, scenario_id: int, **fields) -> models.Scenario | None:
+        scenario = self.db.get(models.Scenario, scenario_id)
+        if not scenario:
+            return None
+        for k, v in fields.items():
+            setattr(scenario, k, v)
+        self.db.commit()
+        self.db.refresh(scenario)
+        return scenario
+
+    def create_scenario(self, offer_id: int, code: str, title: str, description: str | None = None, image_url: str | None = None) -> models.Scenario:
         scenario = models.Scenario(
             offer_id=offer_id,
             code=code,
@@ -85,6 +98,9 @@ class Repo:
         self.db.commit()
         self.db.refresh(entity)
         return entity
+
+    def get_bot_link_for_scenario(self, scenario_id: int) -> models.BotLink | None:
+        return self.db.scalar(select(models.BotLink).where(models.BotLink.scenario_id == scenario_id))
 
     def list_bot_links(self) -> list[models.BotLink]:
         return list(self.db.scalars(select(models.BotLink).order_by(models.BotLink.created_at.desc())))

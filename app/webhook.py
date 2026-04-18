@@ -1,6 +1,7 @@
 import logging
 import secrets as _secrets
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from sqlalchemy.orm import Session
@@ -23,6 +24,7 @@ from app.keyboards.admin import (
     admin_platform_view_keyboard,
     admin_platforms_keyboard,
     admin_scenario_select_offer_keyboard,
+    admin_scenario_settings_keyboard,
     admin_scenario_view_keyboard,
     admin_scenarios_keyboard,
 )
@@ -89,8 +91,8 @@ def _extract_event(payload: dict) -> Event:
             or cb.get("message_id")
             or ""
         )
-        if not mid:
-            logger.debug("callback payload (no mid found): %s", payload)
+        logger.warning("CALLBACK_STRUCT mid=%r keys_cb=%s keys_msg=%s keys_body=%s",
+                       mid, list(cb.keys()), list(cb_msg.keys()), list(cb_body.keys()))
         return Event(
             user_id=int(user.get("user_id") or 0),
             text=str(cb.get("payload", "")).strip(),
@@ -201,10 +203,18 @@ async def _handle_user_callback(
             await api.send_message(user_id, "Сценарий не найден.")
             return
 
-        channels = repo.list_required_channels()
-        if channels:
+        channels_to_check: list = []
+        if scenario.channel_chat_id:
+            channels_to_check.append(SimpleNamespace(
+                chat_id=scenario.channel_chat_id,
+                title=scenario.channel_title or "Канал",
+                invite_link=None,
+            ))
+        channels_to_check.extend(repo.list_required_channels())
+
+        if channels_to_check:
             not_subscribed = []
-            for ch in channels:
+            for ch in channels_to_check:
                 member = await api.get_chat_member(ch.chat_id, user_id)
                 if not member:
                     not_subscribed.append(ch)
@@ -226,9 +236,17 @@ async def _handle_user_callback(
 
     if cb_payload.startswith("user:check_sub:"):
         scenario_code = cb_payload[len("user:check_sub:"):]
-        channels = repo.list_required_channels()
+        scenario = repo.get_scenario_by_code(scenario_code)
+        channels_to_check_s: list = []
+        if scenario and scenario.channel_chat_id:
+            channels_to_check_s.append(SimpleNamespace(
+                chat_id=scenario.channel_chat_id,
+                title=scenario.channel_title or "Канал",
+                invite_link=None,
+            ))
+        channels_to_check_s.extend(repo.list_required_channels())
         not_subscribed = []
-        for ch in channels:
+        for ch in channels_to_check_s:
             member = await api.get_chat_member(ch.chat_id, user_id)
             if not member:
                 not_subscribed.append(ch)
@@ -381,7 +399,7 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
                 offer_id=data["offer_id"],
                 code=code,
                 title=data["title"],
-                description=data["description"],
+                description=data.get("description"),
                 image_url=image_url,
             )
             settings = _get_cached_settings()
@@ -397,6 +415,83 @@ async def _handle_admin_fsm_text(api: MaxApiClient, repo: Repo, user_id: int, te
             )
         except Exception as e:
             await api.send_message(user_id, f"Ошибка создания сценария: {e}")
+        return True
+
+    # --- Редактирование полей существующего сценария ---
+
+    if state == "scenario_edit_image":
+        scenario_id = int(st.data.get("scenario_id", 0))
+        scenario = repo.db.get(Scenario, scenario_id)
+        if not scenario:
+            fsm.clear_state(user_id)
+            await api.send_message(user_id, "Сценарий не найден.")
+            return True
+        image_url = None if text == "-" else text
+        repo.update_scenario_field(scenario_id, image_url=image_url)
+        fsm.clear_state(user_id)
+        scenario = repo.db.get(Scenario, scenario_id)
+        await _reply(
+            "✅ Картинка обновлена." if image_url else "✅ Картинка удалена.",
+            admin_scenario_settings_keyboard(scenario),
+        )
+        return True
+
+    if state == "scenario_edit_text":
+        scenario_id = int(st.data.get("scenario_id", 0))
+        scenario = repo.db.get(Scenario, scenario_id)
+        if not scenario:
+            fsm.clear_state(user_id)
+            await api.send_message(user_id, "Сценарий не найден.")
+            return True
+        description = None if text == "-" else text
+        repo.update_scenario_field(scenario_id, description=description)
+        fsm.clear_state(user_id)
+        scenario = repo.db.get(Scenario, scenario_id)
+        await _reply(
+            "✅ Текст обновлён." if description else "✅ Текст удалён.",
+            admin_scenario_settings_keyboard(scenario),
+        )
+        return True
+
+    if state == "scenario_edit_channel":
+        scenario_id = int(st.data.get("scenario_id", 0))
+        scenario = repo.db.get(Scenario, scenario_id)
+        if not scenario:
+            fsm.clear_state(user_id)
+            await api.send_message(user_id, "Сценарий не найден.")
+            return True
+
+        if text == "-":
+            repo.update_scenario_field(scenario_id, channel_chat_id=None, channel_title=None)
+            fsm.clear_state(user_id)
+            scenario = repo.db.get(Scenario, scenario_id)
+            await _reply("✅ Канал подписки удалён.", admin_scenario_settings_keyboard(scenario))
+            return True
+
+        try:
+            chat_id = int(text)
+        except ValueError:
+            await api.send_message(user_id, "chat_id должен быть числом (например: -1001234567890).\nПопробуйте ещё раз или «-» для отмены:")
+            return True
+
+        settings_ch = _get_cached_settings()
+        api_ch = MaxApiClient(settings_ch.bot_token)
+        try:
+            ok, detail = await api_ch.check_chat_access(chat_id)
+        finally:
+            await api_ch.close()
+
+        if not ok:
+            await api.send_message(
+                user_id,
+                f"⚠️ {detail}\n\nВведите другой chat_id или «-» для отмены:"
+            )
+            return True
+
+        repo.update_scenario_field(scenario_id, channel_chat_id=chat_id, channel_title=detail)
+        fsm.clear_state(user_id)
+        scenario = repo.db.get(Scenario, scenario_id)
+        await _reply(f"✅ Канал «{detail}» привязан.", admin_scenario_settings_keyboard(scenario))
         return True
 
     return False
@@ -510,22 +605,138 @@ async def _handle_admin_callback(
         await _edit_then_ask("Добавление оффера:", "Введите название оффера (карты):")
         return
 
+    def _offer_kbd(offer, scenario) -> list:
+        bl = repo.get_bot_link_for_scenario(scenario.id) if scenario else None
+        return admin_offer_view_keyboard(offer, scenario, has_bot_link=bool(bl))
+
     if cb_payload.startswith("admin:offer_view:"):
         offer_id = int(cb_payload.split(":")[-1])
         offer = repo.db.get(Offer, offer_id)
         if not offer:
             return
-        sep = "&" if "?" in offer.base_url else "?"
-        example = f"{offer.base_url}{sep}{offer.subid_param}=0001"
-        await _edit(f"Оффер: {offer.name}\nПример ссылки:\n{example}", admin_offer_view_keyboard(offer_id, offer.platform_id))
+        scenario = repo.get_scenario_for_offer(offer_id)
+        sep = "&" if "?" in (offer.base_url or "") else "?"
+        base = offer.base_url or "—"
+        example = f"{base}{sep}{offer.subid_param}=0001" if offer.subid_param else base
+        await _edit(
+            f"Оффер: {offer.name}\nПример ссылки:\n{example}",
+            _offer_kbd(offer, scenario),
+        )
+        return
+
+    if cb_payload.startswith("admin:offer_link:"):
+        offer_id = int(cb_payload.split(":")[-1])
+        offer = repo.db.get(Offer, offer_id)
+        if not offer:
+            return
+        sep = "&" if "?" in (offer.base_url or "") else "?"
+        base = offer.base_url or "—"
+        if offer.subid_param:
+            example = f"{base}{sep}{offer.subid_param}=0001"
+            text_out = f"Ссылка оффера «{offer.name}»:\n\n🔗 {example}\n\nГде «0001» — уникальный SUBID подписчика."
+        else:
+            text_out = f"Ссылка оффера «{offer.name}»:\n\n{base}\n\n⚠️ Параметр SUBID не задан."
+        scenario = repo.get_scenario_for_offer(offer_id)
+        await _edit(text_out, _offer_kbd(offer, scenario))
+        return
+
+    if cb_payload.startswith("admin:offer_botlink:"):
+        offer_id = int(cb_payload.split(":")[-1])
+        offer = repo.db.get(Offer, offer_id)
+        if not offer:
+            return
+        scenario = repo.get_scenario_for_offer(offer_id)
+        if not scenario:
+            await _edit(
+                f"Для оффера «{offer.name}» нет сценария.\nСначала настройте Сценарий.",
+                _offer_kbd(offer, scenario),
+            )
+            return
+        bot_link_obj = repo.get_bot_link_for_scenario(scenario.id)
+        deep_link = bot_link_obj.deep_link if bot_link_obj else None
+        if deep_link:
+            await _edit(
+                f"Ссылка на бот для «{offer.name}»:\n\n🔗 {deep_link}\n\nОтправьте эту ссылку подписчикам.",
+                _offer_kbd(offer, scenario),
+            )
+        else:
+            await _edit(
+                f"Ссылка на бот для «{offer.name}» не создана.\n\nНастройте сценарий — ссылка сгенерируется автоматически.",
+                _offer_kbd(offer, scenario),
+            )
+        return
+
+    if cb_payload.startswith("admin:offer_scenario:"):
+        offer_id = int(cb_payload.split(":")[-1])
+        offer = repo.db.get(Offer, offer_id)
+        if not offer:
+            return
+        scenario = repo.get_scenario_for_offer(offer_id)
+        if scenario:
+            await _edit(
+                f"Сценарий оффера «{offer.name}»:",
+                admin_scenario_settings_keyboard(scenario),
+            )
+        else:
+            fsm.set_state(user_id, "scenario_add_title", {"offer_id": offer_id, "_msg_id": message_id})
+            await _edit_then_ask(
+                f"Настройка сценария для «{offer.name}»:",
+                "Введите заголовок сценария (название акции):"
+            )
+        return
+
+    if cb_payload.startswith("admin:scenario_set_image:"):
+        scenario_id = int(cb_payload.split(":")[-1])
+        scenario = repo.db.get(Scenario, scenario_id)
+        if not scenario:
+            return
+        fsm.set_state(user_id, "scenario_edit_image", {"scenario_id": scenario_id})
+        cur = f"\nТекущая: {scenario.image_url}" if scenario.image_url else "\nСейчас не задана."
+        await _edit_then_ask(
+            f"Картинка сценария:",
+            f"Введите URL картинки (JPG/PNG){cur}\nИли «-» чтобы удалить:"
+        )
+        return
+
+    if cb_payload.startswith("admin:scenario_set_text:"):
+        scenario_id = int(cb_payload.split(":")[-1])
+        scenario = repo.db.get(Scenario, scenario_id)
+        if not scenario:
+            return
+        fsm.set_state(user_id, "scenario_edit_text", {"scenario_id": scenario_id})
+        cur = f"\nТекущий:\n{scenario.description}" if scenario.description else "\nСейчас не задан."
+        await _edit_then_ask(
+            "Текст для подписчика:",
+            f"Введите текст акции, который увидит подписчик.{cur}\nИли «-» чтобы удалить:"
+        )
+        return
+
+    if cb_payload.startswith("admin:scenario_set_channel:"):
+        scenario_id = int(cb_payload.split(":")[-1])
+        scenario = repo.db.get(Scenario, scenario_id)
+        if not scenario:
+            return
+        fsm.set_state(user_id, "scenario_edit_channel", {"scenario_id": scenario_id})
+        if scenario.channel_chat_id:
+            cur = f"\nТекущий канал: {scenario.channel_title} ({scenario.channel_chat_id})"
+        else:
+            cur = "\nСейчас не задан."
+        await _edit_then_ask(
+            "Канал подписки:",
+            f"Введите chat_id канала (число, например: -1001234567890){cur}\n"
+            "Бот должен быть участником канала.\n"
+            "Или «-» чтобы убрать канал:"
+        )
         return
 
     if cb_payload.startswith("admin:offer_delete:"):
         offer_id = int(cb_payload.split(":")[-1])
         offer = repo.db.get(Offer, offer_id)
-        name = offer.name if offer else f"#{offer_id}"
+        if not offer:
+            return
+        name = offer.name
         await _edit(
-            f"Удалить оффер «{name}»?",
+            f"Удалить оффер «{name}»?\nСценарий и все лиды также будут удалены.",
             admin_confirm_delete_keyboard(f"admin:offer_delete_yes:{offer_id}", f"admin:offer_view:{offer_id}"),
         )
         return

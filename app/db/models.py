@@ -37,10 +37,12 @@ class Scenario(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     offer_id: Mapped[int] = mapped_column(ForeignKey("offers.id"), index=True)
-    code: Mapped[str] = mapped_column(String(80), unique=True, index=True)  # scenario7
+    code: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     title: Mapped[str] = mapped_column(String(200))
-    description: Mapped[str] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_chat_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    channel_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     offer: Mapped["Offer"] = relationship(back_populates="scenarios")
