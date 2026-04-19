@@ -94,6 +94,17 @@ class Repo:
         r.after_link_text = text
         self.db.commit()
 
+    def update_replica_policy_url(self, url: str | None) -> None:
+        r = self.get_replica_settings()
+        u = (url or "").strip()
+        r.policy_url = u if u else None
+        self.db.commit()
+
+    def effective_personal_data_policy_url(self, env_fallback: str) -> str:
+        r = self.get_replica_settings()
+        u = (r.policy_url or "").strip()
+        return u if u else (env_fallback or "").strip()
+
     def get_scenario_for_offer(self, offer_id: int) -> models.Scenario | None:
         return self.db.scalar(select(models.Scenario).where(models.Scenario.offer_id == offer_id))
 

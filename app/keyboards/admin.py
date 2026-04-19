@@ -30,16 +30,13 @@ def admin_main_keyboard() -> list:
     ]
 
 
-def admin_replicas_menu_keyboard(policy_url: str | None = None) -> list:
-    rows = [
+def admin_replicas_menu_keyboard() -> list:
+    return [
         [_btn("👤 Для незнакомцев", "admin:replica_edit:stranger")],
         [_btn("⏱ После акции (через 5 мин)", "admin:replica_edit:after")],
+        [_btn("📄 Ссылка на правила (согласие)", "admin:replica_edit:policy")],
+        [_btn("🔙 Назад", "admin:main")],
     ]
-    u = (policy_url or "").strip()
-    if u:
-        rows.append([_btn_link("📄 Правила обработки данных", u)])
-    rows.append([_btn("🔙 Назад", "admin:main")])
-    return rows
 
 
 def admin_replica_cancel_keyboard() -> list:

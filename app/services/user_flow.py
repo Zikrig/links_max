@@ -59,4 +59,4 @@ class UserFlowService:
         return final_link
 
     def policy_url(self) -> str:
-        return self.settings.personal_data_policy_url
+        return self.repo.effective_personal_data_policy_url(self.settings.personal_data_policy_url)

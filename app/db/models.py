@@ -124,6 +124,8 @@ class ReplicaSettings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     stranger_text: Mapped[str] = mapped_column(Text)
     after_link_text: Mapped[str] = mapped_column(Text)
+    # Переопределение PERSONAL_DATA_POLICY_URL из .env; пусто/NULL — брать из настроек приложения
+    policy_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Broadcast(Base):

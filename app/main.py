@@ -17,6 +17,7 @@ from app.webhook import router as webhook_router
 logger = logging.getLogger(__name__)
 
 _MIGRATIONS = [
+    "ALTER TABLE replica_settings ADD COLUMN policy_url TEXT",
     "ALTER TABLE leads ADD COLUMN max_name VARCHAR(255)",
     "ALTER TABLE leads ADD COLUMN max_username VARCHAR(120)",
     "ALTER TABLE offers ADD COLUMN base_url TEXT DEFAULT ''",

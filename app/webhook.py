@@ -373,10 +373,11 @@ async def _handle_user_fsm_text(
             "user_await_consent",
             st.data | {"phone": phone, "max_name": max_name, "max_username": max_username},
         )
+        policy_u = repo.effective_personal_data_policy_url(settings.personal_data_policy_url)
         await api.send_message_with_keyboard(
             user_id,
             "Ознакомьтесь с правилами сбора и хранения персональных данных и подтвердите согласие.",
-            user_consent_keyboard(scenario_code, settings.personal_data_policy_url),
+            user_consent_keyboard(scenario_code, policy_u),
         )
         return True
 
@@ -720,7 +721,7 @@ async def _handle_admin_fsm_text(
         rs = repo.get_replica_settings()
         await _reply(
             f"✅ Сохранено.\n\nТекущий текст «Для незнакомцев»:\n{rs.stranger_text}",
-            admin_replicas_menu_keyboard((_get_cached_settings().personal_data_policy_url or "").strip() or None),
+            admin_replicas_menu_keyboard(),
         )
         return True
 
@@ -733,8 +734,28 @@ async def _handle_admin_fsm_text(
         rs = repo.get_replica_settings()
         await _reply(
             f"✅ Сохранено.\n\nТекущий текст «После акции»:\n{rs.after_link_text}",
-            admin_replicas_menu_keyboard((_get_cached_settings().personal_data_policy_url or "").strip() or None),
+            admin_replicas_menu_keyboard(),
         )
+        return True
+
+    if state == "replica_edit_policy":
+        raw = (text or "").strip()
+        settings_ch = _get_cached_settings()
+        if raw.lower() in ("сброс", "reset", "сбросить"):
+            repo.update_replica_policy_url(None)
+            fsm.clear_state(user_id)
+            eff = repo.effective_personal_data_policy_url(settings_ch.personal_data_policy_url)
+            await _reply(
+                f"✅ Сброшено. Сейчас используется:\n{eff or '(пусто — задайте PERSONAL_DATA_POLICY_URL в .env)'}",
+                admin_replicas_menu_keyboard(),
+            )
+            return True
+        if not raw.startswith(("http://", "https://")):
+            await api.send_message(user_id, "Отправьте полный URL, начиная с https:// (или «сброс»).")
+            return True
+        repo.update_replica_policy_url(raw)
+        fsm.clear_state(user_id)
+        await _reply(f"✅ Ссылка сохранена:\n{raw}", admin_replicas_menu_keyboard())
         return True
 
     # --- Рассылка (мастер) ---
@@ -981,12 +1002,23 @@ async def _handle_admin_callback(
         rs = repo.get_replica_settings()
         s1 = _short_replica_preview(rs.stranger_text, DEFAULT_REPLICA_STRANGER)
         s2 = _short_replica_preview(rs.after_link_text, DEFAULT_REPLICA_AFTER_LINK)
-        policy_url = (_get_cached_settings().personal_data_policy_url or "").strip()
-        policy_block = (
-            f"\n\n📄 Правила обработки данных (как при согласии, из .env):\n{policy_url}"
-            if policy_url
-            else "\n\n📄 Правила: не заданы (PERSONAL_DATA_POLICY_URL в .env)."
-        )
+        settings_ad = _get_cached_settings()
+        eff_policy = repo.effective_personal_data_policy_url(settings_ad.personal_data_policy_url)
+        override = (rs.policy_url or "").strip()
+        if override:
+            policy_block = (
+                f"\n\n📄 Ссылка на правила (кнопка «Ознакомиться» при согласии):\n{eff_policy}\n"
+                f"(задана в боте — можно изменить кнопкой «Ссылка на правила» ниже)"
+            )
+        elif eff_policy:
+            policy_block = (
+                f"\n\n📄 Ссылка на правила:\n{eff_policy}\n"
+                f"(из .env; можно задать свою кнопкой «Ссылка на правила» ниже)"
+            )
+        else:
+            policy_block = (
+                "\n\n📄 Ссылка на правила: не задана — укажите в боте или PERSONAL_DATA_POLICY_URL в .env."
+            )
         await _edit(
             "💬 Управление репликами\n\n"
             "К обоим сообщениям добавляются кнопки последних 10 офферов "
@@ -994,14 +1026,28 @@ async def _handle_admin_callback(
             f"👤 Для незнакомцев (вход без кода в ссылке):\n{s1}\n\n"
             f"⏱ После акции (через 5 мин после выдачи ссылки на карту):\n{s2}"
             f"{policy_block}",
-            admin_replicas_menu_keyboard(policy_url if policy_url else None),
+            admin_replicas_menu_keyboard(),
         )
         return
 
     if cb_payload.startswith("admin:replica_edit:"):
         kind = cb_payload.split(":")[-1]
-        if kind not in ("stranger", "after"):
+        if kind not in ("stranger", "after", "policy"):
             await _ack()
+            return
+        settings_ad = _get_cached_settings()
+        if kind == "policy":
+            rs = repo.get_replica_settings()
+            eff = repo.effective_personal_data_policy_url(settings_ad.personal_data_policy_url)
+            src = "задана в боте" if (rs.policy_url or "").strip() else "из .env"
+            fsm.set_state(user_id, "replica_edit_policy", {})
+            await _edit_then_ask(
+                "Ссылка на правила обработки данных",
+                f"Сейчас: {eff or '(пусто)'}\n(источник: {src})\n\n"
+                "Отправьте новый URL (https://...).\n"
+                "Отправьте «сброс» — снова использовать только PERSONAL_DATA_POLICY_URL из .env.",
+                admin_replica_cancel_keyboard(),
+            )
             return
         rs = repo.get_replica_settings()
         current = rs.stranger_text if kind == "stranger" else rs.after_link_text
