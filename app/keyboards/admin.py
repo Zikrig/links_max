@@ -29,8 +29,8 @@ def _nav_row(page: int, total: int, prev_payload: str, next_payload: str) -> lis
     return nav if nav else None
 
 
-def admin_main_keyboard() -> list:
-    return [
+def admin_main_keyboard(*, include_moderators: bool = False) -> list:
+    rows = [
         [_btn("📋 Платформы", "admin:platforms")],
         [_btn("🎯 Офферы", "admin:offers")],
         [_btn("📢 Каналы подписки", "admin:channels")],
@@ -38,6 +38,23 @@ def admin_main_keyboard() -> list:
         [_btn("📣 Рассылка", "admin:broadcast")],
         [_btn("💬 Управление репликами", "admin:replicas")],
     ]
+    if include_moderators:
+        rows.append([_btn("👥 Модераторы", "admin:moderators")])
+    return rows
+
+
+def admin_moderators_keyboard(moderator_ids: list[int]) -> list:
+    """Список модераторов с удалением; добавление и выход."""
+    rows: list = []
+    for uid in moderator_ids:
+        rows.append(
+            [
+                _btn(f"🗑 {uid}", f"admin:moderator_remove:{uid}"),
+            ]
+        )
+    rows.append([_btn("➕ Добавить модератора", "admin:moderator_add")])
+    rows.append([_btn("🔙 Назад", "admin:main")])
+    return rows
 
 
 def admin_replicas_menu_keyboard() -> list:

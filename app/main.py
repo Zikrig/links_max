@@ -44,6 +44,12 @@ _MIGRATIONS = [
         "UNIQUE(scenario_id, required_channel_id)"
         ")"
     ),
+    (
+        "CREATE TABLE IF NOT EXISTS moderators ("
+        "user_id INTEGER PRIMARY KEY NOT NULL, "
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ")"
+    ),
 ]
 
 

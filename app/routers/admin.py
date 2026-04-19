@@ -7,6 +7,7 @@ from app.db.database import get_db
 from app.db.repo import Repo
 from app.keyboards.admin import admin_main_keyboard
 from app.services.admin_service import AdminService
+from app.services.staff_access import can_manage_moderators, can_use_admin_bot
 from app.services.export_service import ExportService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -18,8 +19,8 @@ class AdminAction(BaseModel):
     payload: dict = {}
 
 
-def _require_admin(user_id: int, settings: Settings) -> None:
-    if user_id not in settings.admin_user_ids:
+def _require_staff(user_id: int, settings: Settings, repo: Repo) -> None:
+    if not can_use_admin_bot(user_id, settings, repo):
         raise HTTPException(status_code=403, detail="Недостаточно прав")
 
 
@@ -29,12 +30,17 @@ def handle_admin_command(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
-    _require_admin(action.user_id, settings)
     repo = Repo(db)
+    _require_staff(action.user_id, settings, repo)
     service = AdminService(repo)
 
     if action.command == "admin":
-        return {"text": "Админ-меню", "keyboard": admin_main_keyboard()}
+        return {
+            "text": "Админ-меню",
+            "keyboard": admin_main_keyboard(
+                include_moderators=can_manage_moderators(action.user_id, settings)
+            ),
+        }
     if action.command == "platform_add":
         platform = service.add_platform(action.payload["name"])
         return {"text": f"Платформа добавлена: {platform.name}"}

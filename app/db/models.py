@@ -128,6 +128,15 @@ class ReplicaSettings(Base):
     policy_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class Moderator(Base):
+    """Подчинённые администраторам из .env: полный доступ к админ-боту кроме управления модераторами."""
+
+    __tablename__ = "moderators"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Broadcast(Base):
     __tablename__ = "broadcasts"
 

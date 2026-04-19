@@ -404,3 +404,25 @@ class Repo:
             item.status = "sent"
             item.sent_at = datetime.utcnow()
             self.db.commit()
+
+    def is_moderator(self, user_id: int) -> bool:
+        return self.db.get(models.Moderator, user_id) is not None
+
+    def list_moderator_user_ids(self) -> list[int]:
+        rows = self.db.scalars(select(models.Moderator.user_id).order_by(models.Moderator.user_id))
+        return list(rows)
+
+    def add_moderator(self, user_id: int) -> models.Moderator:
+        m = models.Moderator(user_id=user_id)
+        self.db.add(m)
+        self.db.commit()
+        self.db.refresh(m)
+        return m
+
+    def remove_moderator(self, user_id: int) -> bool:
+        m = self.db.get(models.Moderator, user_id)
+        if not m:
+            return False
+        self.db.delete(m)
+        self.db.commit()
+        return True

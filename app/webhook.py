@@ -46,6 +46,7 @@ from app.keyboards.admin import (
     admin_scenario_select_offer_keyboard,
     admin_scenario_settings_keyboard,
     admin_scenarios_keyboard,
+    admin_moderators_keyboard,
 )
 from app.keyboards.user import (
     user_card_keyboard,
@@ -64,6 +65,7 @@ from app.services.replica_messages import (
 )
 from app.services.replica_runner import schedule_after_link_replica
 from app.services.link_builder import build_offer_link, offer_produces_valid_links
+from app.services.staff_access import can_manage_moderators, can_use_admin_bot
 from app.services.user_flow import UserFlowService
 from app.validators import validate_full_name, validate_phone
 
@@ -89,6 +91,12 @@ def _is_duplicate_callback(callback_id: str) -> bool:
 
 def _get_cached_settings() -> Settings:
     return get_settings()
+
+
+def _admin_main_keyboard_for(user_id: int) -> list:
+    return admin_main_keyboard(
+        include_moderators=can_manage_moderators(user_id, _get_cached_settings())
+    )
 
 
 def _extract_broadcast_image_ref(attachments: list | None) -> str | None:
@@ -1022,7 +1030,7 @@ async def _handle_admin_fsm_text(
             await api.send_message_with_keyboard(
                 user_id,
                 f"✅ Рассылка «{bc.title}» запланирована на {local} (МСК).",
-                admin_main_keyboard(),
+                _admin_main_keyboard_for(user_id),
             )
         except Exception as e:
             await api.send_message(user_id, f"Ошибка: {e}")
@@ -1072,6 +1080,46 @@ async def _handle_admin_fsm_text(
         await api.send_message(
             user_id,
             "Используйте кнопки под превью: «Отправить сейчас», «Отправить позже», «Назад» или «Главное меню».",
+        )
+        return True
+
+    if state == "moderator_add_uid":
+        s = _get_cached_settings()
+        if not can_manage_moderators(user_id, s):
+            fsm.clear_state(user_id)
+            return True
+        nav = admin_input_nav_keyboard("admin:wizard_back", "admin:main")
+        raw = (text or "").strip()
+        if not raw.isdigit():
+            await api.send_message_with_keyboard(
+                user_id, "Нужен числовой user_id (только цифры).", nav
+            )
+            return True
+        new_id = int(raw)
+        if new_id in s.admin_user_ids:
+            await api.send_message_with_keyboard(
+                user_id,
+                "Этот пользователь уже в списке администраторов (.env).",
+                nav,
+            )
+            return True
+        if repo.is_moderator(new_id):
+            await api.send_message_with_keyboard(
+                user_id, "Уже в списке модераторов.", nav
+            )
+            return True
+        repo.add_moderator(new_id)
+        fsm.clear_state(user_id)
+        ids = repo.list_moderator_user_ids()
+        body = (
+            "Модераторы — полный доступ к админ-боту, кроме этого раздела.\n"
+            f"Сейчас в списке: {len(ids)}.\n"
+            + ("\n".join(str(x) for x in ids) if ids else "— пусто —")
+        )
+        await api.send_message_with_keyboard(
+            user_id,
+            f"✅ Модератор добавлен: {new_id}\n\n{body}",
+            admin_moderators_keyboard(ids),
         )
         return True
 
@@ -1311,6 +1359,11 @@ async def _handle_admin_callback(
                 await _handle_admin_callback(api, repo, user_id, "admin:broadcast", "", message_id)
             return
 
+        if st.state == "moderator_add_uid":
+            fsm.clear_state(user_id)
+            await _handle_admin_callback(api, repo, user_id, "admin:moderators", "", message_id)
+            return
+
         fsm.clear_state(user_id)
         await _handle_admin_callback(api, repo, user_id, "admin:main", "", message_id)
         return
@@ -1321,7 +1374,59 @@ async def _handle_admin_callback(
 
     if cb_payload == "admin:main":
         fsm.clear_state(user_id)
-        await _edit("Админ-меню:", admin_main_keyboard())
+        await _edit("Админ-меню:", _admin_main_keyboard_for(user_id))
+        return
+
+    if cb_payload == "admin:moderators":
+        s = _get_cached_settings()
+        if not can_manage_moderators(user_id, s):
+            await _ack()
+            await api.send_message(user_id, "Недостаточно прав.")
+            return
+        fsm.clear_state(user_id)
+        ids = repo.list_moderator_user_ids()
+        body = (
+            "Модераторы — полный доступ к админ-боту, кроме этого раздела.\n"
+            f"Сейчас в списке: {len(ids)}.\n"
+            + ("\n".join(str(x) for x in ids) if ids else "— пусто —")
+        )
+        await _edit(body, admin_moderators_keyboard(ids))
+        return
+
+    if cb_payload == "admin:moderator_add":
+        s = _get_cached_settings()
+        if not can_manage_moderators(user_id, s):
+            await _ack()
+            await api.send_message(user_id, "Недостаточно прав.")
+            return
+        fsm.set_state(user_id, "moderator_add_uid", {})
+        await _edit_then_ask(
+            "Добавление модератора",
+            "Отправьте числовой user_id пользователя MAX.",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+        )
+        return
+
+    if cb_payload.startswith("admin:moderator_remove:"):
+        s = _get_cached_settings()
+        if not can_manage_moderators(user_id, s):
+            await _ack()
+            await api.send_message(user_id, "Недостаточно прав.")
+            return
+        try:
+            mid = int(cb_payload.split(":")[-1])
+        except ValueError:
+            await _ack()
+            return
+        removed = repo.remove_moderator(mid)
+        ids = repo.list_moderator_user_ids()
+        body = (
+            "Модераторы — полный доступ к админ-боту, кроме этого раздела.\n"
+            f"Сейчас в списке: {len(ids)}.\n"
+            + ("\n".join(str(x) for x in ids) if ids else "— пусто —")
+        )
+        head = f"✅ Удалён: {mid}\n\n" if removed else f"Не найден в списке: {mid}\n\n"
+        await _edit(head + body, admin_moderators_keyboard(ids))
         return
 
     if cb_payload == "admin:replicas":
@@ -2236,7 +2341,7 @@ async def _handle_admin_callback(
             launch_broadcast_now(bc.id)
             await _edit(
                 f"✅ Рассылка «{bc.title}» запущена.",
-                admin_main_keyboard(),
+                _admin_main_keyboard_for(user_id),
             )
         except Exception as e:
             await api.send_message(user_id, f"Ошибка: {e}")
@@ -2260,7 +2365,7 @@ async def _handle_admin_callback(
 
     if cb_payload == "admin:broadcast_cancel":
         fsm.clear_state(user_id)
-        await _edit("Админ-меню:", admin_main_keyboard())
+        await _edit("Админ-меню:", _admin_main_keyboard_for(user_id))
         return
 
     logger.warning("Неизвестный admin callback: %r", cb_payload)
@@ -2327,7 +2432,7 @@ async def handle_max_webhook(
             return Response(status_code=200)
 
         repo = Repo(db)
-        is_admin = ev.user_id in settings.admin_user_ids
+        staff_ok = can_use_admin_bot(ev.user_id, settings, repo)
 
         # --- Callbacks ---
         if ev.update_type == "message_callback":
@@ -2336,7 +2441,7 @@ async def handle_max_webhook(
                 return Response(status_code=200)
             if ev.text.startswith("user:"):
                 await _handle_user_callback(api, repo, ev.user_id, ev.text, ev.callback_id, ev.message_id, ev.max_name, ev.max_username, settings)
-            elif is_admin and ev.text.startswith("admin:"):
+            elif staff_ok and ev.text.startswith("admin:"):
                 await _dispatch_admin_callback(api, repo, ev.user_id, ev.text, ev.callback_id, ev.message_id)
             else:
                 if ev.callback_id:
@@ -2356,16 +2461,16 @@ async def handle_max_webhook(
                 return Response(status_code=200)
 
         # FSM: admin-ввод
-        if is_admin and ev.update_type == "message_created":
+        if staff_ok and ev.update_type == "message_created":
             handled = await _handle_admin_fsm_text(api, repo, ev.user_id, ev.text, ev.attachments)
             if handled:
                 return Response(status_code=200)
 
         # Команды
-        if ev.text in ("admin", "/admin") and is_admin:
+        if ev.text in ("admin", "/admin") and staff_ok:
             fsm.clear_state(ev.user_id)
             await api.send_message_with_keyboard(
-                ev.user_id, "Добро пожаловать в админ-меню:", admin_main_keyboard()
+                ev.user_id, "Добро пожаловать в админ-меню:", _admin_main_keyboard_for(ev.user_id)
             )
             return Response(status_code=200)
 

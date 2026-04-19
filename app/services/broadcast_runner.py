@@ -104,11 +104,13 @@ async def run_broadcast(broadcast_id: int) -> None:
             if not recipients:
                 repo.update_broadcast_status(broadcast_id, "failed")
                 warn = "⚠️ Рассылка не выполнена: нет получателей (в базе нет лидов)."
-                for aid in settings.admin_user_ids:
+                # Уведомляем админов из .env и модераторов из БД (как и доступ к админ-боту).
+                notify_ids = set(settings.admin_user_ids) | set(repo.list_moderator_user_ids())
+                for uid in notify_ids:
                     try:
-                        await api.send_message(aid, warn)
+                        await api.send_message(uid, warn)
                     except Exception as exc:
-                        logger.warning("notify admin %s: %s", aid, exc)
+                        logger.warning("notify staff %s: %s", uid, exc)
                 return
 
             text = b.text
