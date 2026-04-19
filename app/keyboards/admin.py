@@ -9,6 +9,16 @@ def _btn_link(text: str, url: str) -> dict:
     return {"type": "link", "text": text, "url": url}
 
 
+def admin_input_nav_keyboard(back_payload: str, menu_payload: str = "admin:main") -> list:
+    """«Назад» на предыдущий шаг/экран и «Главное меню» (если отличается)."""
+    if back_payload == menu_payload:
+        return [[_btn("🔙 Назад", back_payload)]]
+    return [
+        [_btn("🔙 Назад", back_payload)],
+        [_btn("🏠 Главное меню", menu_payload)],
+    ]
+
+
 def _nav_row(page: int, total: int, prev_payload: str, next_payload: str) -> list | None:
     """Ряд кнопок «◀ Назад» / «▶ Далее» для пагинации, или None если не нужен."""
     nav = []
@@ -39,8 +49,9 @@ def admin_replicas_menu_keyboard() -> list:
     ]
 
 
-def admin_replica_cancel_keyboard() -> list:
-    return [[_btn("🔙 Отмена", "admin:replicas")]]
+def admin_replica_input_keyboard() -> list:
+    """Ввод текста/URL в репликах — назад к списку реплик или в главное меню."""
+    return admin_input_nav_keyboard("admin:replicas", "admin:main")
 
 
 def admin_platforms_keyboard(platforms: list, page: int = 0) -> list:
@@ -103,7 +114,14 @@ def admin_offers_keyboard(
     nav = _nav_row(page, total, prev_p, next_p)
     if nav:
         rows.append(nav)
-    add_payload = f"admin:offer_add:{platform_id}" if platform_id else "admin:offer_add"
+    if platform_id:
+        add_payload = (
+            f"admin:offer_add:{platform_id}:1"
+            if from_offers_menu
+            else f"admin:offer_add:{platform_id}:0"
+        )
+    else:
+        add_payload = "admin:offer_add"
     rows.append([_btn("➕ Добавить оффер", add_payload)])
     rows.append([_btn("🔙 Назад", back_payload)])
     return rows
@@ -217,7 +235,7 @@ def admin_scenarios_keyboard(scenarios: list, page: int = 0) -> list:
 
 def admin_scenario_select_offer_keyboard(offers: list) -> list:
     rows = [[_btn(o.name, f"admin:scenario_select_offer:{o.id}")] for o in offers]
-    rows.append([_btn("🔙 Назад", "admin:scenarios")])
+    rows.extend(admin_input_nav_keyboard("admin:scenarios", "admin:main"))
     return rows
 
 
@@ -250,7 +268,7 @@ def admin_channels_keyboard(channels: list, page: int = 0) -> list:
 
 def admin_offer_select_platform_keyboard(platforms: list) -> list:
     rows = [[_btn(p.name, f"admin:offer_select_platform:{p.id}")] for p in platforms]
-    rows.append([_btn("🔙 Назад", "admin:offers")])
+    rows.extend(admin_input_nav_keyboard("admin:offers", "admin:main"))
     return rows
 
 
@@ -315,8 +333,8 @@ def admin_broadcast_manage_keyboard(page: int, total_count: int, items: list) ->
 
 
 def admin_broadcast_manage_cancel_keyboard() -> list:
-    """Отмена ввода времени переноса — назад к списку."""
-    return [[_btn("🔙 Отмена", "admin:broadcast_manage:0")]]
+    """Ввод времени переноса — назад к карточке рассылки или в главное меню."""
+    return admin_input_nav_keyboard("admin:wizard_back", "admin:main")
 
 
 def admin_broadcast_detail_keyboard(broadcast_id: int, status: str) -> list:
@@ -340,34 +358,32 @@ def admin_broadcast_entry_keyboard() -> list:
 
 
 def admin_broadcast_skip_image_keyboard() -> list:
-    return [
-        [_btn("⏭ Без картинки", "admin:broadcast_skip_image")],
-        [_btn("🔙 Отмена", "admin:broadcast_cancel")],
-    ]
+    rows = [[_btn("⏭ Без картинки", "admin:broadcast_skip_image")]]
+    rows.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
+    return rows
 
 
 def admin_broadcast_skip_text_keyboard() -> list:
-    return [
-        [_btn("⏭ Без текста", "admin:broadcast_skip_text")],
-        [_btn("🔙 Отмена", "admin:broadcast_cancel")],
-    ]
+    rows = [[_btn("⏭ Без текста", "admin:broadcast_skip_text")]]
+    rows.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
+    return rows
 
 
 def admin_broadcast_default_button_keyboard(default_label: str = "Перейти к акции") -> list:
     """Кнопка показывает текст по умолчанию, чтобы админ видел, что будет подставлено."""
-    return [
-        [_btn(f"📌 {default_label}", "admin:broadcast_default_btn")],
-        [_btn("🔙 Отмена", "admin:broadcast_cancel")],
-    ]
+    rows = [[_btn(f"📌 {default_label}", "admin:broadcast_default_btn")]]
+    rows.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
+    return rows
 
 
 def admin_broadcast_preview_keyboard() -> list:
-    return [
+    rows = [
         [_btn("▶ Отправить сейчас", "admin:broadcast_send_now")],
         [_btn("📅 Отправить позже", "admin:broadcast_send_later")],
-        [_btn("🔙 Отмена", "admin:broadcast_cancel")],
     ]
+    rows.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
+    return rows
 
 
 def admin_broadcast_schedule_cancel_keyboard() -> list:
-    return [[_btn("🔙 Отмена", "admin:broadcast_cancel")]]
+    return admin_input_nav_keyboard("admin:wizard_back", "admin:main")

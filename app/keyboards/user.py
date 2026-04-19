@@ -39,3 +39,8 @@ def user_consent_keyboard(scenario_code: str, policy_url: str) -> list:
 
 def user_card_keyboard(ref_url: str) -> list:
     return [[_btn_link("Оформить карту", ref_url)]]
+
+
+def user_wizard_nav_keyboard(scenario_code: str) -> list:
+    """Назад на предыдущий шаг ввода (к материалу акции с первого шага)."""
+    return [[_btn_callback("🔙 Назад", f"user:wizard_back:{scenario_code}")]]

@@ -30,6 +30,7 @@ from app.keyboards.admin import (
     admin_confirm_delete_keyboard,
     admin_export_offers_keyboard,
     admin_export_platforms_keyboard,
+    admin_input_nav_keyboard,
     admin_main_keyboard,
     admin_offer_select_platform_keyboard,
     admin_offer_view_keyboard,
@@ -39,7 +40,7 @@ from app.keyboards.admin import (
     admin_scenario_text_menu_keyboard,
     admin_platform_view_keyboard,
     admin_platforms_keyboard,
-    admin_replica_cancel_keyboard,
+    admin_replica_input_keyboard,
     admin_replicas_menu_keyboard,
     admin_scenario_subscription_keyboard,
     admin_scenario_select_offer_keyboard,
@@ -51,6 +52,7 @@ from app.keyboards.user import (
     user_consent_keyboard,
     user_material_keyboard,
     user_subscribe_keyboard,
+    user_wizard_nav_keyboard,
 )
 from app.max_api import MaxApiClient, RateLimitError
 from app.services.broadcast_runner import get_scheduler, launch_broadcast_now, schedule_broadcast_job
@@ -303,15 +305,46 @@ def _short_replica_preview(stored: str, default: str) -> str:
     return t if len(t) <= 400 else t[:397] + "…"
 
 
+async def _show_user_scenario_material(
+    api: MaxApiClient, repo: Repo, user_id: int, scenario_code: str
+) -> None:
+    """Повторно показать экран акции (как после перехода по ссылке сценария)."""
+    scenario = repo.get_scenario_by_code(scenario_code)
+    if not scenario:
+        await api.send_message(user_id, "Сценарий не найден.")
+        return
+    if not offer_produces_valid_links(scenario.offer):
+        await api.send_message(
+            user_id,
+            "Ошибка: для оффера не задана основная ссылка. Обратитесь к администратору.",
+        )
+        return
+    desc = (scenario.description or "").strip()
+    title = (scenario.title or "Акция").strip()
+    kb = user_material_keyboard(scenario_code, None)
+    if scenario.image_url:
+        token = await api.resolve_broadcast_image_token(scenario.image_url)
+        if token:
+            body = desc if desc else title
+            await api.send_message_with_image_and_keyboard(user_id, body, token, kb)
+        else:
+            body = "\n\n".join(x for x in (title, desc) if x).strip() or title
+            await api.send_message_with_keyboard(user_id, body, kb)
+    else:
+        body = desc if desc else title
+        await api.send_message_with_keyboard(user_id, body, kb)
+
+
 # ---------------------------------------------------------------------------
 # FSM: подписчик — ФИО и телефон после «Далее» и проверки подписки (ТЗ)
 # ---------------------------------------------------------------------------
 
 async def _begin_user_fio_flow(api: MaxApiClient, user_id: int, scenario_code: str) -> None:
     fsm.set_state(user_id, "user_fio", {"scenario_code": scenario_code})
-    await api.send_message(
+    await api.send_message_with_keyboard(
         user_id,
         "Введите ФИО, на кого будет оформлена карта (фамилия, имя и отчество).",
+        user_wizard_nav_keyboard(scenario_code),
     )
 
 
@@ -345,25 +378,32 @@ async def _handle_user_fsm_text(
         return False
 
     if st.state == "user_fio":
+        sc = str(st.data.get("scenario_code", ""))
+        nav = user_wizard_nav_keyboard(sc) if sc else []
         if not validate_full_name(text):
-            await api.send_message(
+            await api.send_message_with_keyboard(
                 user_id,
                 "Укажите корректные ФИО: не менее двух слов, в каждом — больше одной буквы.",
+                nav,
             )
             return True
         fsm.set_state(user_id, "user_phone", st.data | {"full_name": text.strip()})
-        await api.send_message(
+        await api.send_message_with_keyboard(
             user_id,
             "Введите номер мобильного телефона, на кого будет оформлена карта "
             "(формат +7 или 8 не важен).",
+            user_wizard_nav_keyboard(sc),
         )
         return True
 
     if st.state == "user_phone":
+        sc = str(st.data.get("scenario_code", ""))
+        nav = user_wizard_nav_keyboard(sc) if sc else []
         if not validate_phone(text):
-            await api.send_message(
+            await api.send_message_with_keyboard(
                 user_id,
                 "Укажите корректный номер телефона (не менее 10 цифр).",
+                nav,
             )
             return True
         scenario_code = st.data["scenario_code"]
@@ -404,6 +444,32 @@ async def _handle_user_callback(
     await api.answer_callback(callback_id)
 
     if cb_payload == "user:noop":
+        return
+
+    if cb_payload.startswith("user:wizard_back:"):
+        scenario_code = cb_payload[len("user:wizard_back:") :].strip()
+        st = fsm.get_state(user_id)
+        if (
+            not st
+            or not scenario_code
+            or str(st.data.get("scenario_code")) != scenario_code
+        ):
+            await api.send_message(
+                user_id, "Сессия устарела. Откройте сценарий по ссылке снова."
+            )
+            return
+        if st.state == "user_phone":
+            fsm.set_state(user_id, "user_fio", {"scenario_code": scenario_code})
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите ФИО, на кого будет оформлена карта (фамилия, имя и отчество).",
+                user_wizard_nav_keyboard(scenario_code),
+            )
+            return
+        if st.state == "user_fio":
+            fsm.clear_state(user_id)
+            await _show_user_scenario_material(api, repo, user_id, scenario_code)
+            return
         return
 
     if cb_payload.startswith("user:next:"):
@@ -513,7 +579,11 @@ async def _handle_admin_fsm_text(
 
     if state == "platform_add":
         if not text:
-            await api.send_message(user_id, "Название не может быть пустым. Введите название платформы:")
+            await api.send_message_with_keyboard(
+                user_id,
+                "Название не может быть пустым. Введите название платформы:",
+                admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+            )
             return True
         repo.create_platform(text)
         fsm.clear_state(user_id)
@@ -523,20 +593,22 @@ async def _handle_admin_fsm_text(
 
     if state == "offer_add_name":
         fsm.set_state(user_id, "offer_add_base_url", st.data | {"name": text})
-        await api.send_message(
+        await api.send_message_with_keyboard(
             user_id,
             "Введите основную ссылку оффера целиком\n"
-            "(например: https://trckcp.com/dl/OrvoJLhNcSbf/97/?erid=2SDnjcLekU9):"
+            "(например: https://trckcp.com/dl/OrvoJLhNcSbf/97/?erid=2SDnjcLekU9):",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
         )
         return True
 
     if state == "offer_add_base_url":
         fsm.set_state(user_id, "offer_add_subid_param", st.data | {"base_url": text})
-        await api.send_message(
+        await api.send_message_with_keyboard(
             user_id,
             "Введите имя переменной для SUBID\n"
             "(например: sub_id1)\n\n"
-            "Бот сам добавит & или ? перед ней в зависимости от ссылки."
+            "Бот сам добавит & или ? перед ней в зависимости от ссылки.",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
         )
         return True
 
@@ -568,20 +640,28 @@ async def _handle_admin_fsm_text(
 
     if state == "channel_add_title":
         if not text:
-            await api.send_message(user_id, "Название не может быть пустым.")
+            await api.send_message_with_keyboard(
+                user_id,
+                "Название не может быть пустым.",
+                admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+            )
             return True
         fsm.set_state(user_id, "channel_add_invite", st.data | {"title": text})
-        await api.send_message(
+        await api.send_message_with_keyboard(
             user_id,
             "Отправьте ссылку-приглашение в канал или публичную ссылку на канал в MAX.\n"
             "Число (chat_id) вводить не нужно — бот определит канал по ссылке. "
             "Бот должен быть администратором канала.",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
         )
         return True
 
     if state == "channel_add_invite":
+        ch_nav = admin_input_nav_keyboard("admin:wizard_back", "admin:main")
         if not text or not text.strip():
-            await api.send_message(user_id, "Пришлите ссылку на канал.")
+            await api.send_message_with_keyboard(
+                user_id, "Пришлите ссылку на канал.", ch_nav
+            )
             return True
         link = text.strip()
         settings_ch = _get_cached_settings()
@@ -589,11 +669,17 @@ async def _handle_admin_fsm_text(
         try:
             ok, chat_id, title_or_err = await api_ch.resolve_chat_from_invite_url(link)
             if not ok or chat_id is None:
-                await api.send_message(user_id, f"⚠️ {title_or_err}\n\nПопробуйте другую ссылку.")
+                await api.send_message_with_keyboard(
+                    user_id,
+                    f"⚠️ {title_or_err}\n\nПопробуйте другую ссылку.",
+                    ch_nav,
+                )
                 return True
             ok_adm, adm_detail, eff_chat_id = await api_ch.check_bot_is_channel_admin(chat_id)
             if not ok_adm:
-                await api.send_message(user_id, f"⚠️ {adm_detail}")
+                await api.send_message_with_keyboard(
+                    user_id, f"⚠️ {adm_detail}", ch_nav
+                )
                 return True
             chat_id = eff_chat_id if eff_chat_id is not None else chat_id
         finally:
@@ -614,6 +700,11 @@ async def _handle_admin_fsm_text(
 
     if state == "scenario_add_title":
         if not text:
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите название сценария (заголовок акции).",
+                admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+            )
             return True
         data = st.data
         fsm.clear_state(user_id)
@@ -674,12 +765,28 @@ async def _handle_admin_fsm_text(
                 break
 
         if image_url is None:
+            sk_img = [
+                [
+                    {
+                        "type": "callback",
+                        "text": "⏭ Пропустить",
+                        "payload": f"admin:scenario_skip_image:{scenario_id}",
+                    }
+                ]
+            ]
+            sk_img.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
             if attachments:
-                await api.send_message(user_id, "Не удалось сохранить изображение. Попробуйте отправить другое.")
+                await api.send_message_with_keyboard(
+                    user_id,
+                    "Не удалось сохранить изображение. Попробуйте отправить другое.",
+                    sk_img,
+                )
                 return True
             if not text:
                 return True
-            await api.send_message(user_id, "Отправьте изображение вложением.")
+            await api.send_message_with_keyboard(
+                user_id, "Отправьте изображение вложением.", sk_img
+            )
             return True
 
         repo.update_scenario_field(scenario_id, image_url=image_url)
@@ -700,7 +807,22 @@ async def _handle_admin_fsm_text(
             fsm.clear_state(user_id)
             return True
         if not text:
-            return True  # пустое — игнорируем
+            sk_txt = [
+                [
+                    {
+                        "type": "callback",
+                        "text": "⏭ Пропустить",
+                        "payload": f"admin:scenario_skip_text:{scenario_id}",
+                    }
+                ]
+            ]
+            sk_txt.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите текст сообщением или нажмите «Пропустить».",
+                sk_txt,
+            )
+            return True
         repo.update_scenario_field(scenario_id, description=text)
         fsm.clear_state(user_id)
         scenario = repo.db.get(Scenario, scenario_id)
@@ -714,7 +836,9 @@ async def _handle_admin_fsm_text(
 
     if state == "replica_edit_stranger":
         if not (text or "").strip():
-            await api.send_message(user_id, "Текст не может быть пустым.")
+            await api.send_message_with_keyboard(
+                user_id, "Текст не может быть пустым.", admin_replica_input_keyboard()
+            )
             return True
         repo.update_replica_stranger_text(text.strip())
         fsm.clear_state(user_id)
@@ -727,7 +851,9 @@ async def _handle_admin_fsm_text(
 
     if state == "replica_edit_after":
         if not (text or "").strip():
-            await api.send_message(user_id, "Текст не может быть пустым.")
+            await api.send_message_with_keyboard(
+                user_id, "Текст не может быть пустым.", admin_replica_input_keyboard()
+            )
             return True
         repo.update_replica_after_link_text(text.strip())
         fsm.clear_state(user_id)
@@ -751,7 +877,11 @@ async def _handle_admin_fsm_text(
             )
             return True
         if not raw.startswith(("http://", "https://")):
-            await api.send_message(user_id, "Отправьте полный URL, начиная с https:// (или «сброс»).")
+            await api.send_message_with_keyboard(
+                user_id,
+                "Отправьте полный URL, начиная с https:// (или «сброс»).",
+                admin_replica_input_keyboard(),
+            )
             return True
         repo.update_replica_policy_url(raw)
         fsm.clear_state(user_id)
@@ -762,7 +892,11 @@ async def _handle_admin_fsm_text(
 
     if state == "broadcast_w_title":
         if not text.strip():
-            await api.send_message(user_id, "Заголовок не может быть пустым.")
+            await api.send_message_with_keyboard(
+                user_id,
+                "Заголовок не может быть пустым.",
+                admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+            )
             return True
         fsm.set_state(user_id, "broadcast_w_image", {"title": text.strip()})
         await api.send_message_with_keyboard(
@@ -777,22 +911,25 @@ async def _handle_admin_fsm_text(
 
         if image_ref is None:
             if not (text or "").strip():
-                await api.send_message(
+                await api.send_message_with_keyboard(
                     user_id,
                     "Пришлите изображение или нажмите «Без картинки».",
+                    admin_broadcast_skip_image_keyboard(),
                 )
                 return True
-            await api.send_message(
+            await api.send_message_with_keyboard(
                 user_id,
                 "Нужна картинка файлом или «Без картинки».",
+                admin_broadcast_skip_image_keyboard(),
             )
             return True
 
         token_ready = await api.resolve_broadcast_image_token(image_ref)
         if not token_ready:
-            await api.send_message(
+            await api.send_message_with_keyboard(
                 user_id,
                 "Не удалось сохранить изображение. Отправьте файл ещё раз или «Без картинки».",
+                admin_broadcast_skip_image_keyboard(),
             )
             return True
 
@@ -823,19 +960,28 @@ async def _handle_admin_fsm_text(
 
     if state == "broadcast_w_button_text":
         if not text.strip():
-            await api.send_message(
+            await api.send_message_with_keyboard(
                 user_id,
                 f"Введите текст кнопки или нажмите «{_BROADCAST_DEFAULT_BUTTON_TEXT}» ниже.\n"
                 f"Значение по умолчанию: «{_BROADCAST_DEFAULT_BUTTON_TEXT}».",
+                admin_broadcast_default_button_keyboard(_BROADCAST_DEFAULT_BUTTON_TEXT),
             )
             return True
         fsm.set_state(user_id, "broadcast_w_button_url", st.data | {"button_text": text.strip()})
-        await api.send_message(user_id, "Введите адрес, куда будет вести кнопка:")
+        await api.send_message_with_keyboard(
+            user_id,
+            "Введите адрес, куда будет вести кнопка:",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+        )
         return True
 
     if state == "broadcast_w_button_url":
         if not text.strip():
-            await api.send_message(user_id, "Адрес не может быть пустым.")
+            await api.send_message_with_keyboard(
+                user_id,
+                "Адрес не может быть пустым.",
+                admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+            )
             return True
         url = _normalize_broadcast_https_url(text)
         data = st.data | {"button_url": url}
@@ -846,14 +992,18 @@ async def _handle_admin_fsm_text(
 
     if state == "broadcast_w_schedule":
         when = _parse_broadcast_schedule(text)
+        sk = admin_broadcast_schedule_cancel_keyboard()
         if not when:
-            await api.send_message(
+            await api.send_message_with_keyboard(
                 user_id,
                 "Не удалось разобрать дату. Пример (московское время): 18.04.2026 15:30",
+                sk,
             )
             return True
         if when <= datetime.utcnow():
-            await api.send_message(user_id, "Укажите дату и время в будущем.")
+            await api.send_message_with_keyboard(
+                user_id, "Укажите дату и время в будущем.", sk
+            )
             return True
         data = st.data
         fsm.clear_state(user_id)
@@ -881,14 +1031,18 @@ async def _handle_admin_fsm_text(
     if state == "broadcast_reschedule_at":
         bid = int(st.data.get("broadcast_id", 0))
         when = _parse_broadcast_schedule(text)
+        rk = admin_broadcast_manage_cancel_keyboard()
         if not when:
-            await api.send_message(
+            await api.send_message_with_keyboard(
                 user_id,
                 "Не удалось разобрать дату. Пример (московское время): 18.04.2026 15:30",
+                rk,
             )
             return True
         if when <= datetime.utcnow():
-            await api.send_message(user_id, "Укажите дату и время в будущем.")
+            await api.send_message_with_keyboard(
+                user_id, "Укажите дату и время в будущем.", rk
+            )
             return True
         b = repo.get_broadcast(bid)
         if not b or b.status != "scheduled":
@@ -917,7 +1071,7 @@ async def _handle_admin_fsm_text(
     if state == "broadcast_preview":
         await api.send_message(
             user_id,
-            "Используйте кнопки под превью: «Отправить сейчас», «Отправить позже» или «Отмена».",
+            "Используйте кнопки под превью: «Отправить сейчас», «Отправить позже», «Назад» или «Главное меню».",
         )
         return True
 
@@ -942,7 +1096,7 @@ async def _handle_admin_callback(
 
     async def _ack() -> None:
         nonlocal _acked
-        if not _acked:
+        if not _acked and callback_id:
             _acked = True
             await api.answer_callback(callback_id)
 
@@ -987,6 +1141,179 @@ async def _handle_admin_callback(
             await api.send_message_with_keyboard(user_id, question, question_buttons)
         else:
             await api.send_message(user_id, question)
+
+    if cb_payload == "admin:wizard_back":
+        await _ack()
+        st = fsm.get_state(user_id)
+        if not st:
+            await _handle_admin_callback(api, repo, user_id, "admin:main", "", message_id)
+            return
+
+        nav = admin_input_nav_keyboard("admin:wizard_back", "admin:main")
+
+        if st.state == "platform_add":
+            bp = st.data.get("_back_payload", "admin:platforms")
+            fsm.clear_state(user_id)
+            await _handle_admin_callback(api, repo, user_id, bp, "", message_id)
+            return
+
+        if st.state == "offer_add_name":
+            bp = st.data.get("_back_payload", "admin:main")
+            fsm.clear_state(user_id)
+            await _handle_admin_callback(api, repo, user_id, bp, "", message_id)
+            return
+
+        if st.state == "offer_add_base_url":
+            d = st.data
+            fsm.set_state(
+                user_id,
+                "offer_add_name",
+                {
+                    "platform_id": d["platform_id"],
+                    "_back_payload": d.get("_back_payload", "admin:main"),
+                },
+            )
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите название оффера (карты):",
+                nav,
+            )
+            return
+
+        if st.state == "offer_add_subid_param":
+            d = st.data
+            fsm.set_state(user_id, "offer_add_base_url", d)
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите основную ссылку оффера целиком\n"
+                "(например: https://trckcp.com/dl/OrvoJLhNcSbf/97/?erid=2SDnjcLekU9):",
+                nav,
+            )
+            return
+
+        if st.state == "channel_add_title":
+            bp = st.data.get("_back_payload", "admin:channels")
+            fsm.clear_state(user_id)
+            await _handle_admin_callback(api, repo, user_id, bp, "", message_id)
+            return
+
+        if st.state == "channel_add_invite":
+            d = st.data
+            fsm.set_state(
+                user_id,
+                "channel_add_title",
+                {"_back_payload": d.get("_back_payload", "admin:channels")},
+            )
+            await api.send_message_with_keyboard(user_id, "Введите название канала:", nav)
+            return
+
+        if st.state == "scenario_add_title":
+            bp = st.data.get("_back_payload", "admin:main")
+            fsm.clear_state(user_id)
+            await _handle_admin_callback(api, repo, user_id, bp, "", message_id)
+            return
+
+        if st.state == "scenario_edit_image":
+            sid = int(st.data.get("scenario_id", 0))
+            fsm.clear_state(user_id)
+            await _handle_admin_callback(
+                api, repo, user_id, f"admin:scenario_image_menu:{sid}", "", message_id
+            )
+            return
+
+        if st.state == "scenario_edit_text":
+            sid = int(st.data.get("scenario_id", 0))
+            fsm.clear_state(user_id)
+            await _handle_admin_callback(
+                api, repo, user_id, f"admin:scenario_text_menu:{sid}", "", message_id
+            )
+            return
+
+        if st.state in ("replica_edit_stranger", "replica_edit_after", "replica_edit_policy"):
+            fsm.clear_state(user_id)
+            await _handle_admin_callback(api, repo, user_id, "admin:replicas", "", message_id)
+            return
+
+        if st.state == "broadcast_w_title":
+            fsm.clear_state(user_id)
+            await _handle_admin_callback(api, repo, user_id, "admin:broadcast", "", message_id)
+            return
+
+        if st.state == "broadcast_w_image":
+            d = st.data
+            fsm.set_state(user_id, "broadcast_w_title", {})
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите короткий заголовок (для истории):",
+                nav,
+            )
+            return
+
+        if st.state == "broadcast_w_text":
+            d = st.data
+            fsm.set_state(user_id, "broadcast_w_image", {"title": d.get("title", "")})
+            await api.send_message_with_keyboard(
+                user_id,
+                "Пришлите изображение или нажмите «Без картинки».",
+                admin_broadcast_skip_image_keyboard(),
+            )
+            return
+
+        if st.state == "broadcast_w_button_text":
+            d = st.data
+            fsm.set_state(user_id, "broadcast_w_text", d)
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите текст уведомления или нажмите «Без текста».",
+                admin_broadcast_skip_text_keyboard(),
+            )
+            return
+
+        if st.state == "broadcast_w_button_url":
+            d = st.data
+            fsm.set_state(user_id, "broadcast_w_button_text", d)
+            await api.send_message_with_keyboard(
+                user_id,
+                f"Введите текст на кнопке.\n\n"
+                f"По умолчанию: «{_BROADCAST_DEFAULT_BUTTON_TEXT}» — или нажмите кнопку с этой надписью ниже.",
+                admin_broadcast_default_button_keyboard(_BROADCAST_DEFAULT_BUTTON_TEXT),
+            )
+            return
+
+        if st.state == "broadcast_preview":
+            d = st.data
+            fsm.set_state(user_id, "broadcast_w_button_url", d)
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите адрес, куда будет вести кнопка:",
+                nav,
+            )
+            return
+
+        if st.state == "broadcast_w_schedule":
+            d = st.data
+            fsm.set_state(user_id, "broadcast_preview", d)
+            preview = _format_broadcast_preview(d)
+            await api.send_message_with_keyboard(
+                user_id, preview, admin_broadcast_preview_keyboard()
+            )
+            return
+
+        if st.state == "broadcast_reschedule_at":
+            bp = st.data.get("_back_payload")
+            bid = int(st.data.get("broadcast_id", 0))
+            if not bp and bid:
+                bp = f"admin:broadcast_view:{bid}"
+            fsm.clear_state(user_id)
+            if bp:
+                await _handle_admin_callback(api, repo, user_id, bp, "", message_id)
+            else:
+                await _handle_admin_callback(api, repo, user_id, "admin:broadcast", "", message_id)
+            return
+
+        fsm.clear_state(user_id)
+        await _handle_admin_callback(api, repo, user_id, "admin:main", "", message_id)
+        return
 
     if cb_payload == "admin:noop":
         await api.answer_callback(callback_id)
@@ -1046,7 +1373,7 @@ async def _handle_admin_callback(
                 f"Сейчас: {eff or '(пусто)'}\n(источник: {src})\n\n"
                 "Отправьте новый URL (https://...).\n"
                 "Отправьте «сброс» — снова использовать только PERSONAL_DATA_POLICY_URL из .env.",
-                admin_replica_cancel_keyboard(),
+                admin_replica_input_keyboard(),
             )
             return
         rs = repo.get_replica_settings()
@@ -1060,7 +1387,7 @@ async def _handle_admin_callback(
         await _edit_then_ask(
             f"Редактирование: {title}",
             f"Текущий текст:\n\n{current}\n\nОтправьте новый текст сообщения:",
-            admin_replica_cancel_keyboard(),
+            admin_replica_input_keyboard(),
         )
         return
 
@@ -1075,8 +1402,12 @@ async def _handle_admin_callback(
         return
 
     if cb_payload == "admin:platform_add":
-        fsm.set_state(user_id, "platform_add")
-        await _edit_then_ask("Добавление платформы:", "Введите название новой платформы:")
+        fsm.set_state(user_id, "platform_add", {"_back_payload": "admin:platforms"})
+        await _edit_then_ask(
+            "Добавление платформы:",
+            "Введите название новой платформы:",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+        )
         return
 
     if cb_payload.startswith("admin:platform_view:"):
@@ -1154,9 +1485,26 @@ async def _handle_admin_callback(
         return
 
     if cb_payload.startswith("admin:offer_add:"):
-        platform_id = int(cb_payload.split(":")[-1])
-        fsm.set_state(user_id, "offer_add_name", {"platform_id": platform_id})
-        await _edit_then_ask("Добавление оффера:", "Введите название оффера (карты):")
+        parts = cb_payload.split(":")
+        if len(parts) < 3:
+            return
+        platform_id = int(parts[2])
+        from_offers = len(parts) > 3 and parts[3] == "1"
+        off_back = (
+            f"admin:offers_by_platform:{platform_id}:0"
+            if from_offers
+            else f"admin:platform_offers:{platform_id}"
+        )
+        fsm.set_state(
+            user_id,
+            "offer_add_name",
+            {"platform_id": platform_id, "_back_payload": off_back},
+        )
+        await _edit_then_ask(
+            "Добавление оффера:",
+            "Введите название оффера (карты):",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+        )
         return
 
     if cb_payload == "admin:offer_add":
@@ -1169,8 +1517,16 @@ async def _handle_admin_callback(
 
     if cb_payload.startswith("admin:offer_select_platform:"):
         platform_id = int(cb_payload.split(":")[-1])
-        fsm.set_state(user_id, "offer_add_name", {"platform_id": platform_id})
-        await _edit_then_ask("Добавление оффера:", "Введите название оффера (карты):")
+        fsm.set_state(
+            user_id,
+            "offer_add_name",
+            {"platform_id": platform_id, "_back_payload": "admin:offer_add"},
+        )
+        await _edit_then_ask(
+            "Добавление оффера:",
+            "Введите название оффера (карты):",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+        )
         return
 
     def _offer_kbd(offer, scenario, *, from_offers_menu: bool = False) -> list:
@@ -1275,14 +1631,25 @@ async def _handle_admin_callback(
                 ),
             )
         else:
+            back_sc = (
+                f"admin:offer_scenario:{offer_id}:from_offers"
+                if from_offers
+                else f"admin:offer_scenario:{offer_id}"
+            )
             fsm.set_state(
                 user_id,
                 "scenario_add_title",
-                {"offer_id": offer_id, "_msg_id": message_id, "from_offers": from_offers},
+                {
+                    "offer_id": offer_id,
+                    "_msg_id": message_id,
+                    "from_offers": from_offers,
+                    "_back_payload": back_sc,
+                },
             )
             await _edit_then_ask(
                 f"Настройка сценария для «{offer.name}»:",
-                "Введите заголовок сценария (название акции):"
+                "Введите заголовок сценария (название акции):",
+                admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
             )
         return
 
@@ -1334,7 +1701,9 @@ async def _handle_admin_callback(
             "_msg_id": message_id,
             "_msg_text": msg_text,
         })
-        await _edit(msg_text, [[{"type": "callback", "text": "⏭ Пропустить", "payload": f"admin:scenario_skip_image:{scenario_id}"}]])
+        rows = [[{"type": "callback", "text": "⏭ Пропустить", "payload": f"admin:scenario_skip_image:{scenario_id}"}]]
+        rows.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
+        await _edit(msg_text, rows)
         return
 
     if cb_payload.startswith("admin:scenario_skip_image:"):
@@ -1373,7 +1742,9 @@ async def _handle_admin_callback(
             "_msg_id": message_id,
             "_msg_text": msg_text,
         })
-        await _edit(msg_text, [[{"type": "callback", "text": "⏭ Пропустить", "payload": f"admin:scenario_skip_text:{scenario_id}"}]])
+        rows = [[{"type": "callback", "text": "⏭ Пропустить", "payload": f"admin:scenario_skip_text:{scenario_id}"}]]
+        rows.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
+        await _edit(msg_text, rows)
         return
 
     if cb_payload.startswith("admin:scenario_skip_text:"):
@@ -1513,8 +1884,16 @@ async def _handle_admin_callback(
 
     if cb_payload.startswith("admin:scenario_select_offer:"):
         offer_id = int(cb_payload.split(":")[-1])
-        fsm.set_state(user_id, "scenario_add_title", {"offer_id": offer_id})
-        await _edit_then_ask("Добавление сценария:", "Введите название сценария (заголовок акции):")
+        fsm.set_state(
+            user_id,
+            "scenario_add_title",
+            {"offer_id": offer_id, "_back_payload": "admin:scenario_add"},
+        )
+        await _edit_then_ask(
+            "Добавление сценария:",
+            "Введите название сценария (заголовок акции):",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+        )
         return
 
     if cb_payload.startswith("admin:scenario_view:"):
@@ -1581,8 +1960,12 @@ async def _handle_admin_callback(
         return
 
     if cb_payload == "admin:channel_add":
-        fsm.set_state(user_id, "channel_add_title")
-        await _edit_then_ask("Добавление канала:", "Введите название канала:")
+        fsm.set_state(user_id, "channel_add_title", {"_back_payload": "admin:channels"})
+        await _edit_then_ask(
+            "Добавление канала:",
+            "Введите название канала:",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+        )
         return
 
     if cb_payload == "admin:channel_link_skip":
@@ -1732,7 +2115,11 @@ async def _handle_admin_callback(
         if not b or b.status != "scheduled":
             await _edit("Перенос недоступен.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)))
             return
-        fsm.set_state(user_id, "broadcast_reschedule_at", {"broadcast_id": bid})
+        fsm.set_state(
+            user_id,
+            "broadcast_reschedule_at",
+            {"broadcast_id": bid, "_back_payload": f"admin:broadcast_view:{bid}"},
+        )
         await _edit(
             "Укажите дату и время отправки (московское время), например:\n18.04.2026 15:30",
             admin_broadcast_manage_cancel_keyboard(),
@@ -1784,6 +2171,7 @@ async def _handle_admin_callback(
         await _edit_then_ask(
             "Новая рассылка",
             "Введите короткий заголовок (для истории):",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
         )
         return
 
@@ -1825,6 +2213,7 @@ async def _handle_admin_callback(
         await _edit_then_ask(
             f"Текст кнопки: «{_BROADCAST_DEFAULT_BUTTON_TEXT}»",
             "Введите адрес, куда будет вести кнопка:",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
         )
         return
 
