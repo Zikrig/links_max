@@ -23,9 +23,7 @@ def admin_main_keyboard() -> list:
     return [
         [_btn("📋 Платформы", "admin:platforms")],
         [_btn("🎯 Офферы", "admin:offers")],
-        [_btn("📝 Сценарии", "admin:scenarios")],
-        [_btn("🔗 Ссылки на бот", "admin:bot_links")],
-        # [_btn("📢 Каналы подписки", "admin:channels")],
+        [_btn("📢 Каналы подписки", "admin:channels")],
         [_btn("📊 Экспорт", "admin:export")],
         [_btn("📣 Рассылка", "admin:broadcast")],
         [_btn("💬 Управление репликами", "admin:replicas")],
@@ -68,18 +66,40 @@ def admin_platform_view_keyboard(platform_id: int) -> list:
     ]
 
 
+def admin_offers_root_keyboard(platforms: list, page: int = 0) -> list:
+    """Первый экран «Офферы» — выбор платформы."""
+    total = len(platforms)
+    items = platforms[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+    rows = [[_btn(p.name, f"admin:offers_by_platform:{p.id}")] for p in items]
+    nav = _nav_row(page, total, f"admin:offers_root:{page - 1}", f"admin:offers_root:{page + 1}")
+    if nav:
+        rows.append(nav)
+    rows.append([_btn("➕ Добавить оффер", "admin:offer_add")])
+    rows.append([_btn("🔙 Назад", "admin:main")])
+    return rows
+
+
 def admin_offers_keyboard(
     offers: list,
     back_payload: str = "admin:main",
     platform_id: int | None = None,
     page: int = 0,
+    *,
+    from_offers_menu: bool = False,
 ) -> list:
     total = len(offers)
     items = offers[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
-    rows = [[_btn(o.name, f"admin:offer_view:{o.id}")] for o in items]
+    rows = []
+    for o in items:
+        ov = f"admin:offer_view:{o.id}:from_offers" if from_offers_menu else f"admin:offer_view:{o.id}"
+        rows.append([_btn(o.name, ov)])
     if platform_id:
-        prev_p = f"admin:platform_offers:{platform_id}:{page - 1}"
-        next_p = f"admin:platform_offers:{platform_id}:{page + 1}"
+        if from_offers_menu:
+            prev_p = f"admin:offers_by_platform:{platform_id}:{page - 1}"
+            next_p = f"admin:offers_by_platform:{platform_id}:{page + 1}"
+        else:
+            prev_p = f"admin:platform_offers:{platform_id}:{page - 1}"
+            next_p = f"admin:platform_offers:{platform_id}:{page + 1}"
     else:
         prev_p = f"admin:offers:{page - 1}"
         next_p = f"admin:offers:{page + 1}"
@@ -98,27 +118,39 @@ def _ind(has_value: bool, optional: bool = True) -> str:
     return "🟡" if optional else "🔴"
 
 
-def admin_offer_view_keyboard(offer, scenario, has_bot_link: bool = False) -> list:
+def admin_offer_view_keyboard(
+    offer,
+    scenario,
+    has_bot_link: bool = False,
+    *,
+    offer_list_back_payload: str | None = None,
+    created_date_label: str | None = None,
+    from_offers_menu: bool = False,
+) -> list:
     link_icon = _ind(bool(offer.base_url and offer.subid_param), optional=False)
     sc_icon = _ind(scenario is not None, optional=False)
     bl_icon = _ind(has_bot_link, optional=False)
-    return [
-        [_btn(f"{link_icon} Ссылка", f"admin:offer_link:{offer.id}")],
-        [_btn(f"{sc_icon} Сценарий", f"admin:offer_scenario:{offer.id}")],
-        [_btn(f"{bl_icon} Ссылка на бот", f"admin:offer_botlink:{offer.id}")],
-        [_btn("🗑 Удалить оффер", f"admin:offer_delete:{offer.id}")],
-        [_btn("🔙 Назад", f"admin:platform_offers:{offer.platform_id}")],
+    back = offer_list_back_payload or f"admin:platform_offers:{offer.platform_id}"
+    suf = ":from_offers" if from_offers_menu else ""
+    rows = [
+        [_btn(f"{link_icon} Ссылка", f"admin:offer_link:{offer.id}{suf}")],
+        [_btn(f"{sc_icon} Сценарий", f"admin:offer_scenario:{offer.id}{suf}")],
+        [_btn(f"{bl_icon} Ссылка на бот", f"admin:offer_botlink:{offer.id}{suf}")],
+        [_btn("🗑 Удалить оффер", f"admin:offer_delete:{offer.id}{suf}")],
     ]
+    if created_date_label:
+        rows.append([_btn(f"📅 Заведён {created_date_label}", "admin:noop")])
+    rows.append([_btn("🔙 Назад", back)])
+    return rows
 
 
 def admin_scenario_settings_keyboard(
-    scenario, channels: list | None = None, back_payload: str | None = None
+    scenario, sub_channel_count: int = 0, back_payload: str | None = None
 ) -> list:
     img_icon = _ind(bool(scenario.image_url))
     txt_icon = _ind(bool(scenario.description))
 
-    channels = channels or []
-    ch_count = len(channels)
+    ch_count = sub_channel_count
     sub_on = getattr(scenario, "check_subscription", False)
     sub_icon = "🟢" if sub_on else "🔴"
     sub_label = "ВКЛ" if sub_on else "ВЫКЛ"
@@ -132,8 +164,8 @@ def admin_scenario_settings_keyboard(
     back_label = "🔙 Назад к сценариям" if back_payload == "admin:scenarios" else "🔙 Назад к офферу"
 
     return [
-        [_btn(f"{img_icon} Картинка", f"admin:scenario_set_image:{scenario.id}")],
-        [_btn(f"{txt_icon} Текст для подписчика", f"admin:scenario_set_text:{scenario.id}")],
+        [_btn(f"{img_icon} Картинка", f"admin:scenario_image_menu:{scenario.id}")],
+        [_btn(f"{txt_icon} Текст для подписчика", f"admin:scenario_text_menu:{scenario.id}")],
         [_btn(f"{sub_icon} Проверка подписки: {sub_label}", f"admin:scenario_toggle_sub:{scenario.id}")],
         [_btn(f"{ch_icon} Каналы ({ch_count})", f"admin:scenario_channels:{scenario.id}")],
         [_btn("🗑 Удалить сценарий", f"admin:scenario_delete:{scenario.id}")],
@@ -141,11 +173,35 @@ def admin_scenario_settings_keyboard(
     ]
 
 
-def admin_scenario_channels_keyboard(scenario_id: int, channels: list) -> list:
+def admin_scenario_image_menu_keyboard(scenario_id: int, has_image: bool) -> list:
+    rows = [
+        [_btn("🔄 Заменить картинку", f"admin:scenario_replace_image:{scenario_id}")],
+    ]
+    if has_image:
+        rows.append([_btn("🗑 Убрать картинку", f"admin:scenario_skip_image:{scenario_id}")])
+    rows.append([_btn("🔙 Назад", f"admin:offer_scenario_view:{scenario_id}")])
+    return rows
+
+
+def admin_scenario_text_menu_keyboard(scenario_id: int) -> list:
+    return [
+        [_btn("🔄 Заменить текст", f"admin:scenario_replace_text:{scenario_id}")],
+        [_btn("🔙 Назад", f"admin:offer_scenario_view:{scenario_id}")],
+    ]
+
+
+def admin_scenario_subscription_keyboard(
+    scenario_id: int, global_channels: list, enabled_ids: set
+) -> list:
+    """Включение глобальных каналов для сценария (заведение каналов — в главном меню)."""
     rows = []
-    for ch in channels:
-        rows.append([_btn(f"❌ {ch.title}", f"admin:scenario_ch_del:{ch.id}")])
-    rows.append([_btn("➕ Добавить канал", f"admin:scenario_ch_add:{scenario_id}")])
+    if not global_channels:
+        rows.append([_btn("📢 Завести каналы (главное меню → Каналы подписки)", "admin:channels")])
+    for ch in global_channels:
+        on = ch.id in enabled_ids
+        icon = "✅" if on else "⬜"
+        label = ch.title if len(ch.title) <= 34 else ch.title[:31] + "…"
+        rows.append([_btn(f"{icon} {label}", f"admin:scenario_sub_ch_toggle:{scenario_id}:{ch.id}")])
     rows.append([_btn("🔙 Назад к сценарию", f"admin:offer_scenario_view:{scenario_id}")])
     return rows
 

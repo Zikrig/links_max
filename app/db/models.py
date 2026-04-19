@@ -50,22 +50,26 @@ class Scenario(Base):
 
     offer: Mapped["Offer"] = relationship(back_populates="scenarios")
     bot_link: Mapped["BotLink"] = relationship(back_populates="scenario", uselist=False, cascade="all, delete-orphan")
-    channels: Mapped[list["ScenarioChannel"]] = relationship(
+    subscription_channel_links: Mapped[list["ScenarioSubscriptionChannel"]] = relationship(
         back_populates="scenario", cascade="all, delete-orphan"
     )
     leads: Mapped[list["Lead"]] = relationship(back_populates="scenario", cascade="all, delete-orphan")
 
 
-class ScenarioChannel(Base):
-    __tablename__ = "scenario_channels"
+class ScenarioSubscriptionChannel(Base):
+    """Какие глобальные каналы (required_channels) включены для проверки подписки в сценарии."""
+
+    __tablename__ = "scenario_subscription_channels"
+    __table_args__ = (
+        UniqueConstraint("scenario_id", "required_channel_id", name="uq_scenario_required_channel"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    scenario_id: Mapped[int] = mapped_column(ForeignKey("scenarios.id"), index=True)
-    chat_id: Mapped[int] = mapped_column(Integer)
-    title: Mapped[str] = mapped_column(String(200))
-    invite_link: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scenario_id: Mapped[int] = mapped_column(ForeignKey("scenarios.id", ondelete="CASCADE"), index=True)
+    required_channel_id: Mapped[int] = mapped_column(ForeignKey("required_channels.id", ondelete="CASCADE"), index=True)
 
-    scenario: Mapped["Scenario"] = relationship(back_populates="channels")
+    scenario: Mapped["Scenario"] = relationship(back_populates="subscription_channel_links")
+    required_channel: Mapped["RequiredChannel"] = relationship(back_populates="subscription_links")
 
 
 class BotLink(Base):
@@ -87,6 +91,10 @@ class RequiredChannel(Base):
     title: Mapped[str] = mapped_column(String(200))
     chat_id: Mapped[int] = mapped_column(Integer, index=True)
     invite_link: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    subscription_links: Mapped[list["ScenarioSubscriptionChannel"]] = relationship(
+        back_populates="required_channel", cascade="all, delete-orphan"
+    )
 
 
 class Lead(Base):

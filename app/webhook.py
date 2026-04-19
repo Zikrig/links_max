@@ -34,11 +34,14 @@ from app.keyboards.admin import (
     admin_offer_select_platform_keyboard,
     admin_offer_view_keyboard,
     admin_offers_keyboard,
+    admin_offers_root_keyboard,
+    admin_scenario_image_menu_keyboard,
+    admin_scenario_text_menu_keyboard,
     admin_platform_view_keyboard,
     admin_platforms_keyboard,
     admin_replica_cancel_keyboard,
     admin_replicas_menu_keyboard,
-    admin_scenario_channels_keyboard,
+    admin_scenario_subscription_keyboard,
     admin_scenario_select_offer_keyboard,
     admin_scenario_settings_keyboard,
     admin_scenarios_keyboard,
@@ -380,6 +383,19 @@ async def _handle_user_fsm_text(
     return False
 
 
+def _offer_view_cb(offer_id: int, from_offers: bool) -> str:
+    return f"admin:offer_view:{offer_id}:from_offers" if from_offers else f"admin:offer_view:{offer_id}"
+
+
+def _scenario_back_to_offer(repo: Repo, user_id: int, scenario_id: int) -> str:
+    scenario = repo.db.get(Scenario, scenario_id)
+    if not scenario:
+        return "admin:main"
+    st = fsm.get_state(user_id)
+    from_nav = bool(st and st.data and st.data.get("_scenario_return_from_offers"))
+    return _offer_view_cb(scenario.offer_id, from_nav)
+
+
 async def _handle_user_callback(
     api: MaxApiClient, repo: Repo, user_id: int, cb_payload: str, callback_id: str,
     message_id: str, max_name: str, max_username: str, settings: Settings,
@@ -396,7 +412,7 @@ async def _handle_user_callback(
             await api.send_message(user_id, "Сценарий не найден.")
             return
         if scenario.check_subscription:
-            channels = repo.list_scenario_channels(scenario.id)
+            channels = repo.list_subscription_channels_for_scenario(scenario.id)
             if channels:
                 not_subscribed = []
                 for ch in channels:
@@ -419,7 +435,7 @@ async def _handle_user_callback(
             await api.send_message(user_id, "Сценарий не найден.")
             return
 
-        channels = repo.list_scenario_channels(scenario.id)
+        channels = repo.list_subscription_channels_for_scenario(scenario.id)
         not_subscribed = []
         for ch in channels:
             if not await api.is_user_member_of_channel(ch.chat_id, user_id):
@@ -528,11 +544,14 @@ async def _handle_admin_fsm_text(
         fsm.clear_state(user_id)
         subid_param = text.strip().lstrip("?&").strip()
         try:
+            tz = ZoneInfo(_get_cached_settings().timezone)
+            created_date = datetime.now(tz).date()
             repo.create_offer(
                 platform_id=data["platform_id"],
                 name=data["name"],
                 base_url=data["base_url"],
                 subid_param=subid_param,
+                created_date=created_date,
             )
             platform_id = data["platform_id"]
             offers = repo.list_offers_for_platform(platform_id)
@@ -610,11 +629,18 @@ async def _handle_admin_fsm_text(
             else:
                 deep_link = f"https://max.ru/start?start={scenario.code}"
             repo.create_or_update_bot_link(scenario.id, deep_link)
-            channels = repo.list_scenario_channels(scenario.id)
-            back = f"admin:offer_view:{data['offer_id']}" if data.get("offer_id") else "admin:scenarios"
+            sub_n = repo.count_subscription_channels_for_scenario(scenario.id)
+            fo = bool(data.get("from_offers"))
+            if not fsm.get_state(user_id):
+                fsm.set_state(user_id, "admin", {})
+            fsm.update_data(user_id, _scenario_return_from_offers=fo)
+            if data.get("offer_id"):
+                back = _offer_view_cb(int(data["offer_id"]), fo)
+            else:
+                back = "admin:scenarios"
             await _reply(
                 f"✅ Сценарий «{text}» создан. Настройте его:",
-                admin_scenario_settings_keyboard(scenario, channels, back_payload=back),
+                admin_scenario_settings_keyboard(scenario, sub_channel_count=sub_n, back_payload=back),
             )
         except Exception as e:
             await api.send_message(user_id, f"Ошибка создания сценария: {e}")
@@ -658,8 +684,12 @@ async def _handle_admin_fsm_text(
         repo.update_scenario_field(scenario_id, image_url=image_url)
         fsm.clear_state(user_id)
         scenario = repo.db.get(Scenario, scenario_id)
-        channels = repo.list_scenario_channels(scenario_id)
-        await _reply("✅ Картинка сохранена.", admin_scenario_settings_keyboard(scenario, channels))
+        sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
+        bp = _scenario_back_to_offer(repo, user_id, scenario_id)
+        await _reply(
+            "✅ Картинка сохранена.",
+            admin_scenario_settings_keyboard(scenario, sub_channel_count=sub_n, back_payload=bp),
+        )
         return True
 
     if state == "scenario_edit_text":
@@ -673,50 +703,12 @@ async def _handle_admin_fsm_text(
         repo.update_scenario_field(scenario_id, description=text)
         fsm.clear_state(user_id)
         scenario = repo.db.get(Scenario, scenario_id)
-        channels = repo.list_scenario_channels(scenario_id)
-        await _reply("✅ Текст сохранён.", admin_scenario_settings_keyboard(scenario, channels))
-        return True
-
-    if state == "scenario_channel_add":
-        scenario_id = int(st.data.get("scenario_id", 0))
-        scenario = repo.db.get(Scenario, scenario_id)
-        if not scenario:
-            fsm.clear_state(user_id)
-            await api.send_message(user_id, "Сценарий не найден.")
-            return True
-
-        if not text or not text.strip():
-            await api.send_message(user_id, "Пришлите ссылку-приглашение или публичную ссылку на канал.")
-            return True
-        link = text.strip()
-
-        settings_ch = _get_cached_settings()
-        api_ch = MaxApiClient(settings_ch.bot_token)
-        try:
-            ok, chat_id, title_or_err = await api_ch.resolve_chat_from_invite_url(link)
-            if not ok or chat_id is None:
-                await api.send_message(user_id, f"⚠️ {title_or_err}\n\nПопробуйте другую ссылку.")
-                return True
-            ok_adm, ch_title, eff_chat_id = await api_ch.check_bot_is_channel_admin(chat_id)
-            if not ok_adm:
-                await api.send_message(
-                    user_id,
-                    f"⚠️ {ch_title}\n\nПришлите другую ссылку или нажмите «Назад».",
-                )
-                return True
-            chat_id = eff_chat_id if eff_chat_id is not None else chat_id
-        finally:
-            await api_ch.close()
-
-        fsm.clear_state(user_id)
-        repo.add_scenario_channel(
-            scenario_id=scenario_id,
-            chat_id=chat_id,
-            title=ch_title,
-            invite_link=link,
+        sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
+        bp = _scenario_back_to_offer(repo, user_id, scenario_id)
+        await _reply(
+            "✅ Текст сохранён.",
+            admin_scenario_settings_keyboard(scenario, sub_channel_count=sub_n, back_payload=bp),
         )
-        channels = repo.list_scenario_channels(scenario_id)
-        await _reply(f"✅ Канал «{ch_title}» добавлен.", admin_scenario_channels_keyboard(scenario_id, channels))
         return True
 
     if state == "replica_edit_stranger":
@@ -975,6 +967,10 @@ async def _handle_admin_callback(
         else:
             await api.send_message(user_id, question)
 
+    if cb_payload == "admin:noop":
+        await api.answer_callback(callback_id)
+        return
+
     if cb_payload == "admin:main":
         fsm.clear_state(user_id)
         await _edit("Админ-меню:", admin_main_keyboard())
@@ -1079,13 +1075,36 @@ async def _handle_admin_callback(
         return
 
     # --- Офферы ---
-    if cb_payload == "admin:offers" or (cb_payload.startswith("admin:offers:") and cb_payload.split(":")[-1].lstrip("-").isdigit()):
+    if cb_payload == "admin:offers" or (
+        cb_payload.startswith("admin:offers_root:") and cb_payload.split(":")[-1].lstrip("-").isdigit()
+    ):
         fsm.clear_state(user_id)
         parts = cb_payload.split(":")
-        page = int(parts[2]) if len(parts) > 2 else 0
-        offers = repo.list_offers()
-        text = "Все офферы:" if offers else "Офферов пока нет."
-        await _edit(text, admin_offers_keyboard(offers, page=page))
+        page = int(parts[2]) if len(parts) > 2 and parts[1] == "offers_root" else 0
+        if cb_payload == "admin:offers":
+            page = 0
+        platforms = repo.list_platforms()
+        text = "Выберите платформу:" if platforms else "Сначала добавьте платформы."
+        await _edit(text, admin_offers_root_keyboard(platforms, page=page))
+        return
+
+    if cb_payload.startswith("admin:offers_by_platform:"):
+        fsm.clear_state(user_id)
+        parts = cb_payload.split(":")
+        platform_id = int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
+        offers = repo.list_offers_for_platform(platform_id)
+        text = "Офферы платформы:" if offers else "Офферов пока нет."
+        await _edit(
+            text,
+            admin_offers_keyboard(
+                offers,
+                back_payload="admin:offers",
+                platform_id=platform_id,
+                page=page,
+                from_offers_menu=True,
+            ),
+        )
         return
 
     if cb_payload.startswith("admin:offer_add:"):
@@ -1108,12 +1127,27 @@ async def _handle_admin_callback(
         await _edit_then_ask("Добавление оффера:", "Введите название оффера (карты):")
         return
 
-    def _offer_kbd(offer, scenario) -> list:
+    def _offer_kbd(offer, scenario, *, from_offers_menu: bool = False) -> list:
         bl = repo.get_bot_link_for_scenario(scenario.id) if scenario else None
-        return admin_offer_view_keyboard(offer, scenario, has_bot_link=bool(bl))
+        d = offer.created_date
+        cdl = d.strftime("%d.%m.%Y") if d else "—"
+        return admin_offer_view_keyboard(
+            offer,
+            scenario,
+            has_bot_link=bool(bl),
+            offer_list_back_payload=(
+                f"admin:offers_by_platform:{offer.platform_id}" if from_offers_menu else None
+            ),
+            created_date_label=cdl,
+            from_offers_menu=from_offers_menu,
+        )
 
     if cb_payload.startswith("admin:offer_view:"):
-        offer_id = int(cb_payload.split(":")[-1])
+        parts = cb_payload.split(":")
+        if len(parts) < 3:
+            return
+        offer_id = int(parts[2])
+        from_offers = len(parts) > 3 and parts[3] == "from_offers"
         offer = repo.db.get(Offer, offer_id)
         if not offer:
             return
@@ -1121,14 +1155,17 @@ async def _handle_admin_callback(
         sep = "&" if "?" in (offer.base_url or "") else "?"
         base = offer.base_url or "—"
         example = f"{base}{sep}{offer.subid_param}=0001" if offer.subid_param else base
+        cdl = offer.created_date.strftime("%d.%m.%Y") if offer.created_date else "—"
         await _edit(
-            f"Оффер: {offer.name}\nПример ссылки:\n{example}",
-            _offer_kbd(offer, scenario),
+            f"Оффер: {offer.name}\n📅 Заведён: {cdl}\n\nПример ссылки:\n{example}",
+            _offer_kbd(offer, scenario, from_offers_menu=from_offers),
         )
         return
 
     if cb_payload.startswith("admin:offer_link:"):
-        offer_id = int(cb_payload.split(":")[-1])
+        parts = cb_payload.split(":")
+        offer_id = int(parts[2])
+        from_offers = len(parts) > 3 and parts[3] == "from_offers"
         offer = repo.db.get(Offer, offer_id)
         if not offer:
             return
@@ -1140,11 +1177,13 @@ async def _handle_admin_callback(
         else:
             text_out = f"Ссылка оффера «{offer.name}»:\n\n{base}\n\n⚠️ Параметр SUBID не задан."
         scenario = repo.get_scenario_for_offer(offer_id)
-        await _edit(text_out, _offer_kbd(offer, scenario))
+        await _edit(text_out, _offer_kbd(offer, scenario, from_offers_menu=from_offers))
         return
 
     if cb_payload.startswith("admin:offer_botlink:"):
-        offer_id = int(cb_payload.split(":")[-1])
+        parts = cb_payload.split(":")
+        offer_id = int(parts[2])
+        from_offers = len(parts) > 3 and parts[3] == "from_offers"
         offer = repo.db.get(Offer, offer_id)
         if not offer:
             return
@@ -1152,7 +1191,7 @@ async def _handle_admin_callback(
         if not scenario:
             await _edit(
                 f"Для оффера «{offer.name}» нет сценария.\nСначала настройте Сценарий.",
-                _offer_kbd(offer, scenario),
+                _offer_kbd(offer, scenario, from_offers_menu=from_offers),
             )
             return
         bot_link_obj = repo.get_bot_link_for_scenario(scenario.id)
@@ -1160,29 +1199,41 @@ async def _handle_admin_callback(
         if deep_link:
             await _edit(
                 f"Ссылка на бот для «{offer.name}»:\n\n🔗 {deep_link}\n\nОтправьте эту ссылку подписчикам.",
-                _offer_kbd(offer, scenario),
+                _offer_kbd(offer, scenario, from_offers_menu=from_offers),
             )
         else:
             await _edit(
                 f"Ссылка на бот для «{offer.name}» не создана.\n\nНастройте сценарий — ссылка сгенерируется автоматически.",
-                _offer_kbd(offer, scenario),
+                _offer_kbd(offer, scenario, from_offers_menu=from_offers),
             )
         return
 
     if cb_payload.startswith("admin:offer_scenario:"):
-        offer_id = int(cb_payload.split(":")[-1])
+        parts = cb_payload.split(":")
+        offer_id = int(parts[2])
+        from_offers = len(parts) > 3 and parts[3] == "from_offers"
         offer = repo.db.get(Offer, offer_id)
         if not offer:
             return
         scenario = repo.get_scenario_for_offer(offer_id)
+        back_ov = _offer_view_cb(offer_id, from_offers)
         if scenario:
-            channels = repo.list_scenario_channels(scenario.id)
+            if not fsm.get_state(user_id):
+                fsm.set_state(user_id, "admin", {})
+            fsm.update_data(user_id, _scenario_return_from_offers=from_offers)
+            sub_n = repo.count_subscription_channels_for_scenario(scenario.id)
             await _edit(
                 f"Сценарий оффера «{offer.name}»:",
-                admin_scenario_settings_keyboard(scenario, channels, back_payload=f"admin:offer_view:{offer_id}"),
+                admin_scenario_settings_keyboard(
+                    scenario, sub_channel_count=sub_n, back_payload=back_ov
+                ),
             )
         else:
-            fsm.set_state(user_id, "scenario_add_title", {"offer_id": offer_id, "_msg_id": message_id})
+            fsm.set_state(
+                user_id,
+                "scenario_add_title",
+                {"offer_id": offer_id, "_msg_id": message_id, "from_offers": from_offers},
+            )
             await _edit_then_ask(
                 f"Настройка сценария для «{offer.name}»:",
                 "Введите заголовок сценария (название акции):"
@@ -1194,15 +1245,39 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        channels = repo.list_scenario_channels(scenario_id)
+        sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
         offer_id = scenario.offer_id
+        st_nav = fsm.get_state(user_id)
+        from_nav = bool(st_nav and st_nav.data and st_nav.data.get("_scenario_return_from_offers"))
+        back_ov = _offer_view_cb(offer_id, from_nav)
         await _edit(
             f"Сценарий оффера:",
-            admin_scenario_settings_keyboard(scenario, channels, back_payload=f"admin:offer_view:{offer_id}"),
+            admin_scenario_settings_keyboard(
+                scenario, sub_channel_count=sub_n, back_payload=back_ov
+            ),
         )
         return
 
-    if cb_payload.startswith("admin:scenario_set_image:"):
+    if cb_payload.startswith("admin:scenario_image_menu:"):
+        scenario_id = int(cb_payload.split(":")[-1])
+        scenario = repo.db.get(Scenario, scenario_id)
+        if not scenario:
+            return
+        has_img = bool((scenario.image_url or "").strip())
+        caption = "📷 Картинка для подписчика."
+        kbd = admin_scenario_image_menu_keyboard(scenario_id, has_image=has_img)
+        if not has_img:
+            await _edit(caption + "\n\nСейчас картинка не задана.", kbd)
+            return
+        token = await api.resolve_broadcast_image_token(scenario.image_url)
+        if token:
+            await api.answer_callback(callback_id)
+            await api.send_message_with_image_and_keyboard(user_id, caption, token, kbd)
+            return
+        await _edit(caption + "\n\nНе удалось загрузить превью.", kbd)
+        return
+
+    if cb_payload.startswith("admin:scenario_replace_image:"):
         scenario_id = int(cb_payload.split(":")[-1])
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
@@ -1221,17 +1296,32 @@ async def _handle_admin_callback(
         fsm.clear_state(user_id)
         repo.update_scenario_field(scenario_id, image_url=None)
         scenario = repo.db.get(Scenario, scenario_id)
-        channels = repo.list_scenario_channels(scenario_id)
-        await _edit("✅ Картинка убрана.", admin_scenario_settings_keyboard(scenario, channels))
+        sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
+        bp = _scenario_back_to_offer(repo, user_id, scenario_id)
+        await _edit(
+            "✅ Картинка убрана.",
+            admin_scenario_settings_keyboard(scenario, sub_channel_count=sub_n, back_payload=bp),
+        )
         return
 
-    if cb_payload.startswith("admin:scenario_set_text:"):
+    if cb_payload.startswith("admin:scenario_text_menu:"):
         scenario_id = int(cb_payload.split(":")[-1])
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        cur = f"\n\nТекущий текст:\n{scenario.description}" if scenario.description else ""
-        msg_text = f"📝 Введите текст акции, который увидит подписчик.{cur}"
+        body = (scenario.description or "").strip() or "Сейчас текст не задан."
+        await _edit(
+            f"📝 Текст для подписчика:\n\n{body}",
+            admin_scenario_text_menu_keyboard(scenario_id),
+        )
+        return
+
+    if cb_payload.startswith("admin:scenario_replace_text:"):
+        scenario_id = int(cb_payload.split(":")[-1])
+        scenario = repo.db.get(Scenario, scenario_id)
+        if not scenario:
+            return
+        msg_text = "📝 Введите текст акции, который увидит подписчик."
         fsm.set_state(user_id, "scenario_edit_text", {
             "scenario_id": scenario_id,
             "_msg_id": message_id,
@@ -1245,8 +1335,12 @@ async def _handle_admin_callback(
         fsm.clear_state(user_id)
         repo.update_scenario_field(scenario_id, description=None)
         scenario = repo.db.get(Scenario, scenario_id)
-        channels = repo.list_scenario_channels(scenario_id)
-        await _edit("✅ Текст убран.", admin_scenario_settings_keyboard(scenario, channels))
+        sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
+        bp = _scenario_back_to_offer(repo, user_id, scenario_id)
+        await _edit(
+            "✅ Текст убран.",
+            admin_scenario_settings_keyboard(scenario, sub_channel_count=sub_n, back_payload=bp),
+        )
         return
 
     if cb_payload.startswith("admin:scenario_toggle_sub:"):
@@ -1257,11 +1351,12 @@ async def _handle_admin_callback(
         new_val = not scenario.check_subscription
         repo.update_scenario_field(scenario_id, check_subscription=new_val)
         scenario = repo.db.get(Scenario, scenario_id)
-        channels = repo.list_scenario_channels(scenario_id)
+        sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
         status = "включена ✅" if new_val else "выключена"
+        bp = _scenario_back_to_offer(repo, user_id, scenario_id)
         await _edit(
             f"Проверка подписки {status}.",
-            admin_scenario_settings_keyboard(scenario, channels),
+            admin_scenario_settings_keyboard(scenario, sub_channel_count=sub_n, back_payload=bp),
         )
         return
 
@@ -1270,70 +1365,82 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        channels = repo.list_scenario_channels(scenario_id)
-        text_ch = f"Каналы сценария ({len(channels)}):" if channels else "Каналов пока нет."
-        await _edit(text_ch, admin_scenario_channels_keyboard(scenario_id, channels))
-        return
-
-    if cb_payload.startswith("admin:scenario_ch_add:"):
-        scenario_id = int(cb_payload.split(":")[-1])
-        fsm.set_state(user_id, "scenario_channel_add", {"scenario_id": scenario_id})
-        await _edit_then_ask(
-            "Добавление канала:",
-            "Отправьте ссылку-приглашение в канал или публичную ссылку на канал в MAX.\n"
-            "Число (chat_id) вводить не нужно. Бот должен быть администратором канала.",
+        global_ch = repo.list_required_channels()
+        enabled = repo.scenario_subscription_channel_ids(scenario_id)
+        text_ch = (
+            "Каналы для этого сценария (заведение каналов — главное меню → «Каналы подписки»):"
         )
-        return
-
-    if cb_payload.startswith("admin:scenario_ch_del:"):
-        channel_id = int(cb_payload.split(":")[-1])
-        from app.db.models import ScenarioChannel as _SC
-        ch = repo.db.get(_SC, channel_id)
-        if not ch:
-            return
         await _edit(
-            f"Удалить канал «{ch.title}» из сценария?",
-            admin_confirm_delete_keyboard(
-                f"admin:scenario_ch_del_yes:{channel_id}",
-                f"admin:scenario_channels:{ch.scenario_id}",
-            ),
+            text_ch,
+            admin_scenario_subscription_keyboard(scenario_id, global_ch, enabled),
         )
         return
 
-    if cb_payload.startswith("admin:scenario_ch_del_yes:"):
-        channel_id = int(cb_payload.split(":")[-1])
-        from app.db.models import ScenarioChannel as _SC2
-        ch = repo.db.get(_SC2, channel_id)
-        scenario_id = ch.scenario_id if ch else 0
-        try:
-            repo.delete_scenario_channel(channel_id)
-            channels = repo.list_scenario_channels(scenario_id)
-            await _edit("✅ Канал удалён.", admin_scenario_channels_keyboard(scenario_id, channels))
-        except Exception as e:
-            await _edit(f"Ошибка удаления: {e}")
+    if cb_payload.startswith("admin:scenario_sub_ch_toggle:"):
+        parts = cb_payload.split(":")
+        if len(parts) < 4:
+            return
+        scenario_id = int(parts[2])
+        req_ch_id = int(parts[3])
+        scenario = repo.db.get(Scenario, scenario_id)
+        if not scenario:
+            return
+        repo.toggle_scenario_subscription_channel(scenario_id, req_ch_id)
+        global_ch = repo.list_required_channels()
+        enabled = repo.scenario_subscription_channel_ids(scenario_id)
+        await _edit(
+            "Каналы для проверки подписки в этом сценарии:",
+            admin_scenario_subscription_keyboard(scenario_id, global_ch, enabled),
+        )
         return
 
     if cb_payload.startswith("admin:offer_delete:"):
-        offer_id = int(cb_payload.split(":")[-1])
+        parts = cb_payload.split(":")
+        offer_id = int(parts[2])
+        from_offers = len(parts) > 3 and parts[3] == "from_offers"
         offer = repo.db.get(Offer, offer_id)
         if not offer:
             return
         name = offer.name
+        suf = ":from_offers" if from_offers else ""
         await _edit(
             f"Удалить оффер «{name}»?\nСценарий и все лиды также будут удалены.",
-            admin_confirm_delete_keyboard(f"admin:offer_delete_yes:{offer_id}", f"admin:offer_view:{offer_id}"),
+            admin_confirm_delete_keyboard(
+                f"admin:offer_delete_yes:{offer_id}{suf}",
+                f"admin:offer_view:{offer_id}{suf}",
+            ),
         )
         return
 
     if cb_payload.startswith("admin:offer_delete_yes:"):
-        offer_id = int(cb_payload.split(":")[-1])
+        parts = cb_payload.split(":")
+        offer_id = int(parts[2])
+        from_offers = len(parts) > 3 and parts[3] == "from_offers"
         offer = repo.db.get(Offer, offer_id)
         platform_id = offer.platform_id if offer else None
         try:
             repo.delete_offer(offer_id)
             if platform_id:
                 offers = repo.list_offers_for_platform(platform_id)
-                await _edit("✅ Оффер удалён.", admin_offers_keyboard(offers, back_payload=f"admin:platform_view:{platform_id}", platform_id=platform_id))
+                if from_offers:
+                    await _edit(
+                        "✅ Оффер удалён.",
+                        admin_offers_keyboard(
+                            offers,
+                            back_payload="admin:offers",
+                            platform_id=platform_id,
+                            from_offers_menu=True,
+                        ),
+                    )
+                else:
+                    await _edit(
+                        "✅ Оффер удалён.",
+                        admin_offers_keyboard(
+                            offers,
+                            back_payload=f"admin:platform_view:{platform_id}",
+                            platform_id=platform_id,
+                        ),
+                    )
             else:
                 await _edit("✅ Оффер удалён.")
         except Exception as e:
@@ -1369,10 +1476,11 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        channels = repo.list_scenario_channels(scenario_id)
+        fsm.update_data(user_id, _scenario_return_from_offers=False)
+        sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
         await _edit(
             f"Сценарий: {scenario.title}",
-            admin_scenario_settings_keyboard(scenario, channels, back_payload="admin:scenarios"),
+            admin_scenario_settings_keyboard(scenario, sub_channel_count=sub_n, back_payload="admin:scenarios"),
         )
         return
 
@@ -1437,12 +1545,6 @@ async def _handle_admin_callback(
             await _edit("Нужна ссылка на канал — без неё нельзя добавить канал. Пришлите ссылку сообщением.")
         return
 
-    if cb_payload == "admin:scenario_ch_link_skip":
-        st = fsm.get_state(user_id)
-        if st and st.state == "scenario_channel_add":
-            await _edit("Нужна ссылка на канал. Пришлите ссылку сообщением.")
-        return
-
     if cb_payload.startswith("admin:channel_delete:"):
         channel_id = int(cb_payload.split(":")[-1])
         from app.db.models import RequiredChannel as _RC
@@ -1489,7 +1591,11 @@ async def _handle_admin_callback(
         await _edit("⏳ Генерирую файл...")
         try:
             svc = ExportService(repo.db)
-            path = svc.export_leads_xlsx(platform_id=offer.platform_id, offer_id=offer_id)
+            path = svc.export_leads_xlsx(
+                platform_id=offer.platform_id,
+                offer_id=offer_id,
+                timezone_name=_get_cached_settings().timezone,
+            )
             file_bytes = path.read_bytes()
             token = await api.upload_file(file_bytes, path.name)
             if token:

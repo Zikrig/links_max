@@ -1,4 +1,5 @@
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from openpyxl import Workbook
 from sqlalchemy.orm import Session
@@ -10,8 +11,17 @@ class ExportService:
     def __init__(self, db: Session):
         self.repo = Repo(db)
 
-    def export_leads_xlsx(self, platform_id: int, offer_id: int, output_dir: str = "/tmp") -> Path:
+    def export_leads_xlsx(
+        self,
+        platform_id: int,
+        offer_id: int,
+        output_dir: str = "/tmp",
+        *,
+        timezone_name: str = "Europe/Moscow",
+    ) -> Path:
         leads = self.repo.list_leads_for_export(platform_id=platform_id, offer_id=offer_id)
+        tz = ZoneInfo(timezone_name)
+        tz_label = timezone_name.split("/")[-1]
         wb = Workbook()
         ws = wb.active
         ws.title = "Leads"
@@ -19,9 +29,9 @@ class ExportService:
             [
                 "Партнерская платформа",
                 "Название карты (оффера)",
-                "Дата заведения оффера",
+                f"Дата заведения оффера ({tz_label})",
                 "SUBID",
-                "Дата получения ссылки",
+                f"Дата получения ссылки ({tz_label})",
                 "ФИО (введено)",
                 "Телефон",
                 "Имя в MAX",
@@ -30,13 +40,22 @@ class ExportService:
             ]
         )
         for lead in leads:
+            od = lead.offer.created_date
+            offer_date_str = od.strftime("%d.%m.%Y") if od else ""
+            issued = lead.issued_at
+            if issued is not None:
+                if issued.tzinfo is None:
+                    issued = issued.replace(tzinfo=ZoneInfo("UTC"))
+                issued_str = issued.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                issued_str = ""
             ws.append(
                 [
                     lead.offer.platform.name,
                     lead.offer.name,
-                    str(lead.offer.created_date),
+                    offer_date_str,
                     lead.subid_value,
-                    lead.issued_at.isoformat(sep=" ", timespec="seconds"),
+                    issued_str,
                     lead.full_name,
                     lead.phone,
                     lead.max_name or "",

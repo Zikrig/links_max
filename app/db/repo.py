@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
@@ -35,12 +35,15 @@ class Repo:
         name: str,
         base_url: str,
         subid_param: str,
+        *,
+        created_date: date | None = None,
     ) -> models.Offer:
         offer = models.Offer(
             platform_id=platform_id,
             name=name,
             base_url=base_url,
             subid_param=subid_param,
+            created_date=created_date if created_date is not None else date.today(),
         )
         self.db.add(offer)
         self.db.commit()
@@ -117,27 +120,54 @@ class Repo:
         self.db.refresh(scenario)
         return scenario
 
-    def add_scenario_channel(
-        self, scenario_id: int, chat_id: int, title: str, invite_link: str | None = None
-    ) -> models.ScenarioChannel:
-        ch = models.ScenarioChannel(
-            scenario_id=scenario_id, chat_id=chat_id, title=title, invite_link=invite_link
+    def list_subscription_channels_for_scenario(self, scenario_id: int) -> list[models.RequiredChannel]:
+        """Глобальные каналы, включённые для сценария (проверка подписки)."""
+        stmt = (
+            select(models.RequiredChannel)
+            .join(
+                models.ScenarioSubscriptionChannel,
+                models.ScenarioSubscriptionChannel.required_channel_id == models.RequiredChannel.id,
+            )
+            .where(models.ScenarioSubscriptionChannel.scenario_id == scenario_id)
+            .order_by(models.RequiredChannel.id)
         )
-        self.db.add(ch)
-        self.db.commit()
-        self.db.refresh(ch)
-        return ch
+        return list(self.db.scalars(stmt))
 
-    def list_scenario_channels(self, scenario_id: int) -> list[models.ScenarioChannel]:
-        return list(self.db.scalars(
-            select(models.ScenarioChannel).where(models.ScenarioChannel.scenario_id == scenario_id)
-        ))
+    def count_subscription_channels_for_scenario(self, scenario_id: int) -> int:
+        n = self.db.scalar(
+            select(func.count())
+            .select_from(models.ScenarioSubscriptionChannel)
+            .where(models.ScenarioSubscriptionChannel.scenario_id == scenario_id)
+        )
+        return int(n or 0)
 
-    def delete_scenario_channel(self, channel_id: int) -> None:
-        entity = self.db.get(models.ScenarioChannel, channel_id)
-        if entity:
-            self.db.delete(entity)
+    def scenario_subscription_channel_ids(self, scenario_id: int) -> set[int]:
+        rows = self.db.scalars(
+            select(models.ScenarioSubscriptionChannel.required_channel_id).where(
+                models.ScenarioSubscriptionChannel.scenario_id == scenario_id
+            )
+        ).all()
+        return set(rows)
+
+    def toggle_scenario_subscription_channel(self, scenario_id: int, required_channel_id: int) -> bool:
+        """Переключить включение канала. Возвращает True, если после действия канал включён."""
+        existing = self.db.scalar(
+            select(models.ScenarioSubscriptionChannel).where(
+                models.ScenarioSubscriptionChannel.scenario_id == scenario_id,
+                models.ScenarioSubscriptionChannel.required_channel_id == required_channel_id,
+            )
+        )
+        if existing:
+            self.db.delete(existing)
             self.db.commit()
+            return False
+        self.db.add(
+            models.ScenarioSubscriptionChannel(
+                scenario_id=scenario_id, required_channel_id=required_channel_id
+            )
+        )
+        self.db.commit()
+        return True
 
     def list_scenarios(self) -> list[models.Scenario]:
         return list(self.db.scalars(select(models.Scenario).order_by(models.Scenario.created_at.desc())))

@@ -93,6 +93,7 @@ def handle_admin_command(
             platform_id=int(action.payload["platform_id"]),
             offer_id=int(action.payload["offer_id"]),
             output_dir=action.payload.get("output_dir", "/tmp"),
+            timezone_name=settings.timezone,
         )
         return {"text": "Экспорт готов", "file_path": str(path)}
 

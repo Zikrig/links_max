@@ -35,6 +35,14 @@ _MIGRATIONS = [
         "invite_link VARCHAR(255)"
         ")"
     ),
+    (
+        "CREATE TABLE IF NOT EXISTS scenario_subscription_channels ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "scenario_id INTEGER NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE, "
+        "required_channel_id INTEGER NOT NULL REFERENCES required_channels(id) ON DELETE CASCADE, "
+        "UNIQUE(scenario_id, required_channel_id)"
+        ")"
+    ),
 ]
 
 
@@ -66,6 +74,58 @@ def _fix_scenarios_description_nullable(conn) -> None:
             break
 
 
+def _migrate_scenario_channels_to_subscription_links(conn) -> None:
+    """Перенос legacy scenario_channels → required_channels + scenario_subscription_channels."""
+    try:
+        has_old = conn.execute(
+            text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scenario_channels'")
+        ).fetchone()
+        if not has_old:
+            return
+        old_count = conn.execute(text("SELECT COUNT(*) FROM scenario_channels")).scalar() or 0
+        if old_count == 0:
+            return
+    except Exception:
+        return
+    rows = conn.execute(
+        text("SELECT scenario_id, chat_id, title, invite_link FROM scenario_channels")
+    ).fetchall()
+    for scenario_id, chat_id, title, invite_link in rows:
+        row = conn.execute(
+            text("SELECT id FROM required_channels WHERE chat_id = :cid"),
+            {"cid": chat_id},
+        ).fetchone()
+        if row:
+            rc_id = row[0]
+        else:
+            conn.execute(
+                text(
+                    "INSERT INTO required_channels (title, chat_id, invite_link) "
+                    "VALUES (:title, :cid, :inv)"
+                ),
+                {"title": title, "cid": chat_id, "inv": invite_link},
+            )
+            conn.commit()
+            rc_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+        try:
+            conn.execute(
+                text(
+                    "INSERT OR IGNORE INTO scenario_subscription_channels "
+                    "(scenario_id, required_channel_id) VALUES (:sid, :rid)"
+                ),
+                {"sid": scenario_id, "rid": rc_id},
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+    try:
+        conn.execute(text("DELETE FROM scenario_channels"))
+        conn.commit()
+        logger.info("Migration: scenario_channels перенесены в глобальные каналы и связи")
+    except Exception as exc:
+        logger.warning("Migration: не удалось очистить scenario_channels: %s", exc)
+
+
 def _run_migrations() -> None:
     with engine.connect() as conn:
         for migration in _MIGRATIONS:
@@ -79,6 +139,7 @@ def _run_migrations() -> None:
             except Exception:
                 pass  # колонка уже существует или миграция уже применена
         _fix_scenarios_description_nullable(conn)
+        _migrate_scenario_channels_to_subscription_links(conn)
 
 
 @asynccontextmanager
