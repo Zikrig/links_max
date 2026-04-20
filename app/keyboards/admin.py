@@ -178,11 +178,32 @@ def admin_offer_view_keyboard(
     return rows
 
 
-def admin_offer_post_keyboard(offer_id: int, enabled: bool) -> list:
+def admin_offer_post_keyboard(
+    offer_id: int,
+    *,
+    enabled: bool,
+    has_image: bool,
+    has_text: bool,
+    has_button_text: bool,
+    has_button_url: bool,
+) -> list:
     status = "🟢 ВКЛ" if enabled else "🔴 ВЫКЛ"
+    image_icon = _ind(has_image)
+    text_icon = _ind(has_text)
+    bt_icon = _ind(has_button_text)
+    url_icon = _ind(has_button_url, optional=False)
+    image_label = "🔄 Картинка" if has_image else "🖼 Картинка"
     return [
         [_btn(f"{status} / Переключить", f"admin:offer_post_toggle:{offer_id}")],
-        [_btn("✏️ Настроить пост-сообщение", f"admin:offer_post_edit:{offer_id}")],
+        [_btn(f"{image_icon} {image_label}", f"admin:offer_post_set_image:{offer_id}")],
+        [_btn(f"{text_icon} Текст", f"admin:offer_post_set_text:{offer_id}")],
+        [_btn(f"{bt_icon} Надпись на кнопке", f"admin:offer_post_set_button_text:{offer_id}")],
+        [_btn(f"{url_icon} Ссылка кнопки", f"admin:offer_post_set_button_url:{offer_id}")],
+    ] + (
+        [[_btn("🗑 Убрать картинку", f"admin:offer_post_clear_image:{offer_id}")]]
+        if has_image
+        else []
+    ) + [
         [_btn("🔙 Назад", f"admin:offer_view:{offer_id}")],
     ]
 
