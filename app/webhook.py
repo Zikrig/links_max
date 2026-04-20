@@ -74,6 +74,8 @@ logger = logging.getLogger(__name__)
 # Дедупликация callback_id: защита от повторных webhook от MAX при задержках
 _seen_callbacks: dict[str, float] = {}
 _CALLBACK_TTL = 60.0  # секунд
+_seen_message_created: dict[str, float] = {}
+_MESSAGE_CREATED_TTL = 120.0  # секунд
 
 def _is_duplicate_callback(callback_id: str) -> bool:
     """Вернуть True если этот callback_id уже обрабатывался недавно."""
@@ -85,6 +87,18 @@ def _is_duplicate_callback(callback_id: str) -> bool:
     if callback_id in _seen_callbacks:
         return True
     _seen_callbacks[callback_id] = now
+    return False
+
+
+def _is_duplicate_message_created(message_id: str) -> bool:
+    """Вернуть True если message_created с этим mid уже обрабатывался недавно."""
+    now = time.monotonic()
+    expired = [k for k, v in _seen_message_created.items() if now - v > _MESSAGE_CREATED_TTL]
+    for k in expired:
+        del _seen_message_created[k]
+    if message_id in _seen_message_created:
+        return True
+    _seen_message_created[message_id] = now
     return False
 
 
@@ -2871,6 +2885,11 @@ async def handle_max_webhook(
         # --- Текстовые сообщения ---
         if ev.update_type not in ("message_created", "bot_started", ""):
             return Response(status_code=200)
+
+        if ev.update_type == "message_created" and ev.message_id:
+            if _is_duplicate_message_created(ev.message_id):
+                logger.info("Duplicate message_created mid=%s — skip", ev.message_id[:20])
+                return Response(status_code=200)
 
         # FSM: подписчик
         if ev.update_type == "message_created":

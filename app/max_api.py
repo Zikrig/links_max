@@ -90,6 +90,10 @@ def _chat_id_from_payload(data: dict) -> int | None:
 
 
 class MaxApiClient:
+    # Общий лимитер на процесс: разные экземпляры клиента не должны обгонять друг друга.
+    _global_request_lock = asyncio.Lock()
+    _global_last_request_ts = 0.0
+
     def __init__(self, bot_token: str):
         self._bot_token = bot_token
         self._auth_mode = "bearer"
@@ -98,8 +102,6 @@ class MaxApiClient:
             headers={"Authorization": f"Bearer {bot_token}"},
             timeout=20.0,
         )
-        self._request_lock = asyncio.Lock()
-        self._last_request_ts = 0.0
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -115,12 +117,12 @@ class MaxApiClient:
         attempt = 0
         while True:
             # Микрофриз: сглаживаем burst и снижаем риск 429.
-            async with self._request_lock:
+            async with self.__class__._global_request_lock:
                 now = time.monotonic()
-                elapsed = now - self._last_request_ts
+                elapsed = now - self.__class__._global_last_request_ts
                 if elapsed < _MIN_REQUEST_INTERVAL:
                     await asyncio.sleep(_MIN_REQUEST_INTERVAL - elapsed)
-                self._last_request_ts = time.monotonic()
+                self.__class__._global_last_request_ts = time.monotonic()
             response = await self.client.request(method, path, **kwargs)
 
             if response.status_code == 429:
