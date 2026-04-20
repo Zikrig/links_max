@@ -20,6 +20,12 @@ _AFTER_DELAY = timedelta(minutes=5)
 def schedule_offer_post_message(user_id: int, offer_id: int) -> None:
     """Одна отложенная отправка пост-сообщения на пользователя; новый вызов переносит время."""
     run_at = datetime.now(timezone.utc) + _AFTER_DELAY
+    logger.info(
+        "Schedule offer post message user_id=%s offer_id=%s run_at=%s",
+        user_id,
+        offer_id,
+        run_at.isoformat(),
+    )
     get_scheduler().add_job(
         run_offer_post_message_job,
         "date",
@@ -38,12 +44,17 @@ async def run_offer_post_message_job(user_id: int, offer_id: int) -> None:
         try:
             repo = Repo(db)
             offer = db.get(Offer, offer_id)
-            if not offer or not offer.post_enabled:
+            if not offer:
+                logger.info("offer_post skip: offer not found user_id=%s offer_id=%s", user_id, offer_id)
+                return
+            if not offer.post_enabled:
+                logger.info("offer_post skip: disabled user_id=%s offer_id=%s", user_id, offer_id)
                 return
             body = (offer.post_text or "").strip() or f"Предложение по офферу «{offer.name}»"
             btn_text = (offer.post_button_text or "").strip() or "Перейти к акции"
             btn_url = (offer.post_button_url or "").strip()
             if not btn_url:
+                logger.info("offer_post skip: empty button url user_id=%s offer_id=%s", user_id, offer_id)
                 return
             buttons = [[{"type": "link", "text": btn_text, "url": btn_url}]]
             image_ref = (offer.post_image_url or "").strip()
@@ -51,8 +62,14 @@ async def run_offer_post_message_job(user_id: int, offer_id: int) -> None:
                 token = await api.resolve_broadcast_image_token(image_ref)
                 if token:
                     await api.send_message_with_image_and_keyboard(user_id, body, token, buttons)
+                    logger.info(
+                        "offer_post sent with image user_id=%s offer_id=%s",
+                        user_id,
+                        offer_id,
+                    )
                     return
             await api.send_message_with_keyboard(user_id, body, buttons)
+            logger.info("offer_post sent user_id=%s offer_id=%s", user_id, offer_id)
         finally:
             db.close()
     except Exception as exc:

@@ -642,7 +642,17 @@ async def _handle_user_callback(
         )
         scenario = repo.get_scenario_by_code(str(scenario_code))
         if scenario:
-            schedule_offer_post_message(user_id, scenario.offer_id)
+            offer = repo.db.get(Offer, scenario.offer_id)
+            if offer and bool(offer.post_enabled) and bool((offer.post_button_url or "").strip()):
+                schedule_offer_post_message(user_id, scenario.offer_id)
+            else:
+                logger.info(
+                    "Skip scheduling offer post user_id=%s offer_id=%s enabled=%s has_url=%s",
+                    user_id,
+                    scenario.offer_id,
+                    bool(offer.post_enabled) if offer else False,
+                    bool((offer.post_button_url or "").strip()) if offer else False,
+                )
         return
 
 
