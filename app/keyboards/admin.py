@@ -408,6 +408,7 @@ def admin_broadcast_detail_keyboard(broadcast_id: int, status: str) -> list:
         rows.append([_btn("🗑 Удалить", f"admin:broadcast_cancel_pending:{broadcast_id}")])
     elif status in ("sent", "failed"):
         rows.append([_btn("📋 Повторить (копия)", f"admin:broadcast_repeat:{broadcast_id}")])
+        rows.append([_btn("🗑 Удалить", f"admin:broadcast_delete:{broadcast_id}")])
     rows.append([_btn("🔙 К списку", "admin:broadcast_manage:0")])
     return rows
 

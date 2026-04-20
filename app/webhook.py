@@ -2752,6 +2752,55 @@ async def _handle_admin_callback(
             )
         return
 
+    if cb_payload.startswith("admin:broadcast_delete:"):
+        try:
+            bid = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            await _ack()
+            return
+        b = repo.get_broadcast(bid)
+        if not b or b.status not in ("sent", "failed"):
+            await _edit(
+                "Удаление недоступно.",
+                admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)),
+            )
+            return
+        await _edit(
+            f"Удалить рассылку #{bid} из списка? Запись будет удалена безвозвратно.",
+            admin_confirm_delete_keyboard(
+                f"admin:broadcast_delete_yes:{bid}",
+                f"admin:broadcast_view:{bid}",
+            ),
+        )
+        return
+
+    if cb_payload.startswith("admin:broadcast_delete_yes:"):
+        try:
+            bid = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            await _ack()
+            return
+        if repo.delete_broadcast_history(bid):
+            total = repo.count_broadcasts()
+            ps = BROADCAST_MANAGE_PAGE_SIZE
+            await _edit(
+                f"Рассылка #{bid} удалена из списка.",
+                admin_broadcast_manage_keyboard(0, total, repo.list_broadcasts_paged(0, ps)),
+            )
+        else:
+            b = repo.get_broadcast(bid)
+            if b:
+                await _edit(
+                    "Не удалось удалить.",
+                    admin_broadcast_detail_keyboard(bid, b.status),
+                )
+            else:
+                await _edit(
+                    "Рассылка не найдена.",
+                    admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)),
+                )
+        return
+
     if cb_payload.startswith("admin:broadcast_repeat:"):
         try:
             oid = int(cb_payload.rsplit(":", 1)[-1])

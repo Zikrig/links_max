@@ -384,6 +384,15 @@ class Repo:
         self.db.commit()
         return True
 
+    def delete_broadcast_history(self, broadcast_id: int) -> bool:
+        """Удалить запись об отправленной или сбойной рассылке из списка."""
+        b = self.db.get(models.Broadcast, broadcast_id)
+        if not b or b.status not in ("sent", "failed"):
+            return False
+        self.db.delete(b)
+        self.db.commit()
+        return True
+
     def list_scheduled_broadcasts_with_send_at(self) -> list[models.Broadcast]:
         """Все отложенные по send_at (для восстановления планировщика после рестарта)."""
         stmt = (
