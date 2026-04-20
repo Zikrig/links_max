@@ -60,7 +60,6 @@ def admin_moderators_keyboard(moderator_ids: list[int]) -> list:
 def admin_replicas_menu_keyboard() -> list:
     return [
         [_btn("👤 Для незнакомцев", "admin:replica_edit:stranger")],
-        [_btn("⏱ После акции (через 5 мин)", "admin:replica_edit:after")],
         [_btn("📄 Ссылка на правила (согласие)", "admin:replica_edit:policy")],
         [_btn("🔙 Назад", "admin:main")],
     ]
@@ -162,18 +161,30 @@ def admin_offer_view_keyboard(
     link_icon = _ind(bool(offer.base_url and offer.subid_param), optional=False)
     sc_icon = _ind(scenario is not None, optional=False)
     bl_icon = _ind(has_bot_link, optional=False)
+    post_ready = bool((offer.post_button_url or "").strip())
+    post_icon = "🟢" if bool(offer.post_enabled) and post_ready else ("🟡" if post_ready else "🔴")
     back = offer_list_back_payload or f"admin:platform_offers:{offer.platform_id}"
     suf = ":from_offers" if from_offers_menu else ""
     rows = [
         [_btn(f"{link_icon} Ссылка", f"admin:offer_link:{offer.id}{suf}")],
         [_btn(f"{sc_icon} Сценарий", f"admin:offer_scenario:{offer.id}{suf}")],
         [_btn(f"{bl_icon} Ссылка на бот", f"admin:offer_botlink:{offer.id}{suf}")],
+        [_btn(f"{post_icon} Пост-сообщение", f"admin:offer_post:{offer.id}{suf}")],
         [_btn("🗑 Удалить оффер", f"admin:offer_delete:{offer.id}{suf}")],
     ]
     if created_date_label:
         rows.append([_btn(f"📅 Заведён {created_date_label}", "admin:noop")])
     rows.append([_btn("🔙 Назад", back)])
     return rows
+
+
+def admin_offer_post_keyboard(offer_id: int, enabled: bool) -> list:
+    status = "🟢 ВКЛ" if enabled else "🔴 ВЫКЛ"
+    return [
+        [_btn(f"{status} / Переключить", f"admin:offer_post_toggle:{offer_id}")],
+        [_btn("✏️ Настроить пост-сообщение", f"admin:offer_post_edit:{offer_id}")],
+        [_btn("🔙 Назад", f"admin:offer_view:{offer_id}")],
+    ]
 
 
 def admin_scenario_settings_keyboard(

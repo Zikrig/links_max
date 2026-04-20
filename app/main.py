@@ -22,6 +22,11 @@ _MIGRATIONS = [
     "ALTER TABLE leads ADD COLUMN max_username VARCHAR(120)",
     "ALTER TABLE offers ADD COLUMN base_url TEXT DEFAULT ''",
     "ALTER TABLE offers ADD COLUMN subid_param VARCHAR(80) DEFAULT ''",
+    "ALTER TABLE offers ADD COLUMN post_enabled BOOLEAN DEFAULT 0",
+    "ALTER TABLE offers ADD COLUMN post_text TEXT DEFAULT ''",
+    "ALTER TABLE offers ADD COLUMN post_image_url TEXT",
+    "ALTER TABLE offers ADD COLUMN post_button_text VARCHAR(80) DEFAULT 'Перейти к акции'",
+    "ALTER TABLE offers ADD COLUMN post_button_url VARCHAR(255) DEFAULT ''",
     # channel_chat_id / channel_title больше не используются (заменены ScenarioChannel),
     # но миграции безвредны для существующих БД
     "ALTER TABLE scenarios ADD COLUMN channel_chat_id INTEGER",

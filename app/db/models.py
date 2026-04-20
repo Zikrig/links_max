@@ -28,6 +28,11 @@ class Offer(Base):
     base_url: Mapped[str] = mapped_column(Text, default="")
     subid_param: Mapped[str] = mapped_column(String(80), default="")
     next_subid: Mapped[int] = mapped_column(Integer, default=1)
+    post_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    post_text: Mapped[str] = mapped_column(Text, default="")
+    post_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    post_button_text: Mapped[str] = mapped_column(String(80), default="Перейти к акции")
+    post_button_url: Mapped[str] = mapped_column(String(255), default="")
 
     platform: Mapped["Platform"] = relationship(back_populates="offers")
     scenarios: Mapped[list["Scenario"]] = relationship(

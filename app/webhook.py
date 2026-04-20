@@ -33,6 +33,7 @@ from app.keyboards.admin import (
     admin_input_nav_keyboard,
     admin_main_keyboard,
     admin_offer_select_platform_keyboard,
+    admin_offer_post_keyboard,
     admin_offer_view_keyboard,
     admin_offers_keyboard,
     admin_offers_root_keyboard,
@@ -59,11 +60,10 @@ from app.max_api import MaxApiClient, RateLimitError
 from app.services.broadcast_runner import get_scheduler, launch_broadcast_now, schedule_broadcast_job
 from app.services.export_service import ExportService
 from app.services.replica_messages import (
-    DEFAULT_REPLICA_AFTER_LINK,
     DEFAULT_REPLICA_STRANGER,
     send_replica_with_offers,
 )
-from app.services.replica_runner import schedule_after_link_replica
+from app.services.replica_runner import schedule_offer_post_message
 from app.services.link_builder import build_offer_link, offer_produces_valid_links
 from app.services.staff_access import can_manage_moderators, can_use_admin_bot
 from app.services.user_flow import UserFlowService
@@ -132,6 +132,7 @@ def _normalize_broadcast_https_url(raw: str) -> str:
 
 # Текст кнопки по умолчанию в рассылке (ТЗ и модель Broadcast)
 _BROADCAST_DEFAULT_BUTTON_TEXT = "Перейти к акции"
+_OFFER_POST_DEFAULT_BUTTON_TEXT = "Перейти к акции"
 
 
 def _format_broadcast_preview(data: dict) -> str:
@@ -148,6 +149,36 @@ def _format_broadcast_preview(data: dict) -> str:
         lines.extend(["", f"Текст у получателя: заголовок «{data.get('title', '')}»", ""])
     btn = data.get("button_text") or _BROADCAST_DEFAULT_BUTTON_TEXT
     lines.append(f"Кнопка: «{btn}» → {data.get('button_url', '')}")
+    return "\n".join(lines)
+
+
+async def _send_broadcast_preview(
+    api: MaxApiClient, user_id: int, data: dict, buttons: list
+) -> None:
+    """Отправить превью рассылки; при наличии картинки показать её в сообщении."""
+    preview = _format_broadcast_preview(data)
+    image_ref = (data.get("image_url") or "").strip()
+    if image_ref:
+        token = await api.resolve_broadcast_image_token(image_ref)
+        if token:
+            await api.send_message_with_image_and_keyboard(user_id, preview, token, buttons)
+            return
+    await api.send_message_with_keyboard(user_id, preview, buttons)
+
+
+def _format_offer_post_preview(offer) -> str:
+    data = {
+        "title": offer.name,
+        "text": offer.post_text or "",
+        "button_url": offer.post_button_url or "",
+        "button_text": offer.post_button_text or _OFFER_POST_DEFAULT_BUTTON_TEXT,
+        "image_url": offer.post_image_url,
+    }
+    lines = ["📨 Пост-сообщение оффера", ""]
+    status = "включено" if bool(offer.post_enabled) else "выключено"
+    lines.append(f"Статус: {status}")
+    lines.append("")
+    lines.append(_format_broadcast_preview(data))
     return "\n".join(lines)
 
 
@@ -560,7 +591,9 @@ async def _handle_user_callback(
             "Для оформления карты на сайте банка перейдите по ссылке ниже.",
             user_card_keyboard(link),
         )
-        schedule_after_link_replica(user_id)
+        scenario = repo.get_scenario_by_code(str(scenario_code))
+        if scenario:
+            schedule_offer_post_message(user_id, scenario.offer_id)
         return
 
 
@@ -857,21 +890,6 @@ async def _handle_admin_fsm_text(
         )
         return True
 
-    if state == "replica_edit_after":
-        if not (text or "").strip():
-            await api.send_message_with_keyboard(
-                user_id, "Текст не может быть пустым.", admin_replica_input_keyboard()
-            )
-            return True
-        repo.update_replica_after_link_text(text.strip())
-        fsm.clear_state(user_id)
-        rs = repo.get_replica_settings()
-        await _reply(
-            f"✅ Сохранено.\n\nТекущий текст «После акции»:\n{rs.after_link_text}",
-            admin_replicas_menu_keyboard(),
-        )
-        return True
-
     if state == "replica_edit_policy":
         raw = (text or "").strip()
         settings_ch = _get_cached_settings()
@@ -994,8 +1012,9 @@ async def _handle_admin_fsm_text(
         url = _normalize_broadcast_https_url(text)
         data = st.data | {"button_url": url}
         fsm.set_state(user_id, "broadcast_preview", data)
-        preview = _format_broadcast_preview(data)
-        await api.send_message_with_keyboard(user_id, preview, admin_broadcast_preview_keyboard())
+        await _send_broadcast_preview(
+            api, user_id, data, admin_broadcast_preview_keyboard()
+        )
         return True
 
     if state == "broadcast_w_schedule":
@@ -1185,6 +1204,123 @@ async def _handle_admin_fsm_text(
         await api.send_message(
             user_id,
             "Используйте кнопки под превью: «Отправить сейчас», «Отправить позже», «Назад» или «Главное меню».",
+        )
+        return True
+
+    # --- Пост-сообщение оффера (через 5 минут после выдачи ссылки) ---
+    if state == "offer_post_w_image":
+        image_ref = _extract_broadcast_image_ref(attachments)
+        if image_ref is None:
+            if not (text or "").strip():
+                await api.send_message_with_keyboard(
+                    user_id,
+                    "Пришлите изображение или нажмите «Без картинки».",
+                    admin_broadcast_skip_image_keyboard(),
+                )
+                return True
+            await api.send_message_with_keyboard(
+                user_id,
+                "Нужна картинка файлом или «Без картинки».",
+                admin_broadcast_skip_image_keyboard(),
+            )
+            return True
+        token_ready = await api.resolve_broadcast_image_token(image_ref)
+        if not token_ready:
+            await api.send_message_with_keyboard(
+                user_id,
+                "Не удалось сохранить изображение. Отправьте файл ещё раз или «Без картинки».",
+                admin_broadcast_skip_image_keyboard(),
+            )
+            return True
+        fsm.set_state(user_id, "offer_post_w_text", st.data | {"image_url": token_ready})
+        await api.send_message_with_keyboard(
+            user_id,
+            "Введите текст пост-сообщения или нажмите «Без текста».",
+            admin_broadcast_skip_text_keyboard(),
+        )
+        return True
+
+    if state == "offer_post_w_text":
+        if not text.strip():
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите текст или нажмите «Без текста».",
+                admin_broadcast_skip_text_keyboard(),
+            )
+            return True
+        fsm.set_state(user_id, "offer_post_w_button_text", st.data | {"text": text.strip()})
+        await api.send_message_with_keyboard(
+            user_id,
+            f"Введите текст на кнопке.\n\n"
+            f"По умолчанию: «{_OFFER_POST_DEFAULT_BUTTON_TEXT}» — или нажмите кнопку с этой надписью ниже.",
+            admin_broadcast_default_button_keyboard(_OFFER_POST_DEFAULT_BUTTON_TEXT),
+        )
+        return True
+
+    if state == "offer_post_w_button_text":
+        if not text.strip():
+            await api.send_message_with_keyboard(
+                user_id,
+                f"Введите текст кнопки или нажмите «{_OFFER_POST_DEFAULT_BUTTON_TEXT}» ниже.\n"
+                f"Значение по умолчанию: «{_OFFER_POST_DEFAULT_BUTTON_TEXT}».",
+                admin_broadcast_default_button_keyboard(_OFFER_POST_DEFAULT_BUTTON_TEXT),
+            )
+            return True
+        fsm.set_state(
+            user_id, "offer_post_w_button_url", st.data | {"button_text": text.strip()}
+        )
+        await api.send_message_with_keyboard(
+            user_id,
+            "Введите адрес, куда будет вести кнопка:",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+        )
+        return True
+
+    if state == "offer_post_w_button_url":
+        if not text.strip():
+            await api.send_message_with_keyboard(
+                user_id,
+                "Адрес не может быть пустым.",
+                admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+            )
+            return True
+        offer_id = int(st.data.get("offer_id", 0))
+        if not offer_id:
+            fsm.clear_state(user_id)
+            return True
+        url = _normalize_broadcast_https_url(text)
+        data = st.data | {"button_url": url}
+        fsm.set_state(user_id, "offer_post_preview", data)
+        fake_offer = SimpleNamespace(
+            name=data.get("offer_name", "Оффер"),
+            post_enabled=bool(data.get("enabled", False)),
+            post_text=data.get("text", ""),
+            post_image_url=data.get("image_url"),
+            post_button_text=data.get("button_text", _OFFER_POST_DEFAULT_BUTTON_TEXT),
+            post_button_url=data.get("button_url", ""),
+        )
+        await _send_broadcast_preview(
+            api,
+            user_id,
+            {
+                "title": fake_offer.name,
+                "text": fake_offer.post_text,
+                "button_url": fake_offer.post_button_url,
+                "button_text": fake_offer.post_button_text,
+                "image_url": fake_offer.post_image_url,
+            },
+            [
+                [{"type": "callback", "text": "✅ Сохранить", "payload": f"admin:offer_post_save:{offer_id}"}],
+                [{"type": "callback", "text": "🔙 Назад", "payload": "admin:wizard_back"}],
+                [{"type": "callback", "text": "🏠 Главное меню", "payload": "admin:main"}],
+            ],
+        )
+        return True
+
+    if state == "offer_post_preview":
+        await api.send_message(
+            user_id,
+            "Используйте кнопки под превью: «Сохранить», «Назад» или «Главное меню».",
         )
         return True
 
@@ -1382,7 +1518,7 @@ async def _handle_admin_callback(
             )
             return
 
-        if st.state in ("replica_edit_stranger", "replica_edit_after", "replica_edit_policy"):
+        if st.state in ("replica_edit_stranger", "replica_edit_policy"):
             fsm.clear_state(user_id)
             await _handle_admin_callback(api, repo, user_id, "admin:replicas", "", message_id)
             return
@@ -1446,9 +1582,8 @@ async def _handle_admin_callback(
         if st.state == "broadcast_w_schedule":
             d = st.data
             fsm.set_state(user_id, "broadcast_preview", d)
-            preview = _format_broadcast_preview(d)
-            await api.send_message_with_keyboard(
-                user_id, preview, admin_broadcast_preview_keyboard()
+            await _send_broadcast_preview(
+                api, user_id, d, admin_broadcast_preview_keyboard()
             )
             return
 
@@ -1476,6 +1611,56 @@ async def _handle_admin_callback(
                 await _handle_admin_callback(api, repo, user_id, f"admin:broadcast_view:{bid}", "", message_id)
             else:
                 await _handle_admin_callback(api, repo, user_id, "admin:broadcast_manage:0", "", message_id)
+            return
+
+        if st.state == "offer_post_w_image":
+            offer_id = int(st.data.get("offer_id", 0))
+            fsm.clear_state(user_id)
+            if offer_id:
+                await _handle_admin_callback(api, repo, user_id, f"admin:offer_post:{offer_id}", "", message_id)
+            else:
+                await _handle_admin_callback(api, repo, user_id, "admin:main", "", message_id)
+            return
+
+        if st.state == "offer_post_w_text":
+            d = st.data
+            fsm.set_state(user_id, "offer_post_w_image", d)
+            await api.send_message_with_keyboard(
+                user_id,
+                "Пришлите изображение или нажмите «Без картинки».",
+                admin_broadcast_skip_image_keyboard(),
+            )
+            return
+
+        if st.state == "offer_post_w_button_text":
+            d = st.data
+            fsm.set_state(user_id, "offer_post_w_text", d)
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите текст пост-сообщения или нажмите «Без текста».",
+                admin_broadcast_skip_text_keyboard(),
+            )
+            return
+
+        if st.state == "offer_post_w_button_url":
+            d = st.data
+            fsm.set_state(user_id, "offer_post_w_button_text", d)
+            await api.send_message_with_keyboard(
+                user_id,
+                f"Введите текст на кнопке.\n\n"
+                f"По умолчанию: «{_OFFER_POST_DEFAULT_BUTTON_TEXT}» — или нажмите кнопку с этой надписью ниже.",
+                admin_broadcast_default_button_keyboard(_OFFER_POST_DEFAULT_BUTTON_TEXT),
+            )
+            return
+
+        if st.state == "offer_post_preview":
+            d = st.data
+            fsm.set_state(user_id, "offer_post_w_button_url", d)
+            await api.send_message_with_keyboard(
+                user_id,
+                "Введите адрес, куда будет вести кнопка:",
+                nav,
+            )
             return
 
         if st.state == "moderator_add_uid":
@@ -1552,7 +1737,6 @@ async def _handle_admin_callback(
         fsm.clear_state(user_id)
         rs = repo.get_replica_settings()
         s1 = _short_replica_preview(rs.stranger_text, DEFAULT_REPLICA_STRANGER)
-        s2 = _short_replica_preview(rs.after_link_text, DEFAULT_REPLICA_AFTER_LINK)
         settings_ad = _get_cached_settings()
         eff_policy = repo.effective_personal_data_policy_url(settings_ad.personal_data_policy_url)
         override = (rs.policy_url or "").strip()
@@ -1575,7 +1759,6 @@ async def _handle_admin_callback(
             "К обоим сообщениям добавляются кнопки последних 10 офферов "
             "(по дате создания карточки; ссылка — на сценарий оффера).\n\n"
             f"👤 Для незнакомцев (вход без кода в ссылке):\n{s1}\n\n"
-            f"⏱ После акции (через 5 мин после выдачи ссылки на карту):\n{s2}"
             f"{policy_block}",
             admin_replicas_menu_keyboard(),
         )
@@ -1583,7 +1766,7 @@ async def _handle_admin_callback(
 
     if cb_payload.startswith("admin:replica_edit:"):
         kind = cb_payload.split(":")[-1]
-        if kind not in ("stranger", "after", "policy"):
+        if kind not in ("stranger", "policy"):
             await _ack()
             return
         settings_ad = _get_cached_settings()
@@ -1601,12 +1784,8 @@ async def _handle_admin_callback(
             )
             return
         rs = repo.get_replica_settings()
-        current = rs.stranger_text if kind == "stranger" else rs.after_link_text
-        title = (
-            "Для незнакомцев"
-            if kind == "stranger"
-            else "После акции (через 5 мин после выдачи ссылки на карту)"
-        )
+        current = rs.stranger_text
+        title = "Для незнакомцев"
         fsm.set_state(user_id, f"replica_edit_{kind}", {})
         await _edit_then_ask(
             f"Редактирование: {title}",
@@ -1832,6 +2011,87 @@ async def _handle_admin_callback(
                 f"Ссылка на бот для «{offer.name}» не создана.\n\nНастройте сценарий — ссылка сгенерируется автоматически.",
                 _offer_kbd(offer, scenario, from_offers_menu=from_offers),
             )
+        return
+
+    if cb_payload.startswith("admin:offer_post:"):
+        parts = cb_payload.split(":")
+        offer_id = int(parts[2])
+        offer = repo.db.get(Offer, offer_id)
+        if not offer:
+            return
+        await _edit(
+            _format_offer_post_preview(offer),
+            admin_offer_post_keyboard(offer_id, bool(offer.post_enabled)),
+        )
+        return
+
+    if cb_payload.startswith("admin:offer_post_toggle:"):
+        offer_id = int(cb_payload.split(":")[-1])
+        offer = repo.db.get(Offer, offer_id)
+        if not offer:
+            return
+        can_enable = bool((offer.post_button_url or "").strip())
+        new_enabled = (not bool(offer.post_enabled)) if can_enable else False
+        if not can_enable and not offer.post_enabled:
+            await _edit(
+                "Сначала настройте кнопку пост-сообщения (URL обязателен).",
+                admin_offer_post_keyboard(offer_id, False),
+            )
+            return
+        offer = repo.update_offer_post_fields(offer_id, post_enabled=new_enabled)
+        if not offer:
+            return
+        await _edit(
+            _format_offer_post_preview(offer),
+            admin_offer_post_keyboard(offer_id, bool(offer.post_enabled)),
+        )
+        return
+
+    if cb_payload.startswith("admin:offer_post_edit:"):
+        offer_id = int(cb_payload.split(":")[-1])
+        offer = repo.db.get(Offer, offer_id)
+        if not offer:
+            return
+        fsm.set_state(
+            user_id,
+            "offer_post_w_image",
+            {
+                "offer_id": offer_id,
+                "offer_name": offer.name,
+                "enabled": bool(offer.post_enabled),
+            },
+        )
+        await _edit_then_ask(
+            f"Пост-сообщение для «{offer.name}»",
+            "Пришлите изображение или нажмите «Без картинки».",
+            admin_broadcast_skip_image_keyboard(),
+        )
+        return
+
+    if cb_payload.startswith("admin:offer_post_save:"):
+        offer_id = int(cb_payload.split(":")[-1])
+        st = fsm.get_state(user_id)
+        if not st or st.state != "offer_post_preview" or int(st.data.get("offer_id", 0)) != offer_id:
+            await _ack()
+            return
+        data = st.data
+        fsm.clear_state(user_id)
+        offer = repo.update_offer_post_fields(
+            offer_id,
+            post_text=data.get("text", ""),
+            post_button_text=data.get("button_text", _OFFER_POST_DEFAULT_BUTTON_TEXT),
+            post_button_url=data.get("button_url", ""),
+            post_image_url=data.get("image_url"),
+            post_enabled=bool(data.get("enabled", False)),
+            clear_image=(data.get("image_url") is None),
+        )
+        if not offer:
+            await _edit("Оффер не найден.")
+            return
+        await _edit(
+            "✅ Пост-сообщение сохранено.\n\n" + _format_offer_post_preview(offer),
+            admin_offer_post_keyboard(offer_id, bool(offer.post_enabled)),
+        )
         return
 
     if cb_payload.startswith("admin:offer_scenario:"):
@@ -2454,8 +2714,16 @@ async def _handle_admin_callback(
 
     if cb_payload == "admin:broadcast_skip_image":
         st = fsm.get_state(user_id)
-        if not st or st.state not in ("broadcast_w_image", "broadcast_edit_image"):
+        if not st or st.state not in ("broadcast_w_image", "broadcast_edit_image", "offer_post_w_image"):
             await _ack()
+            return
+        if st.state == "offer_post_w_image":
+            fsm.set_state(user_id, "offer_post_w_text", st.data | {"image_url": None})
+            await _edit_then_ask(
+                "Без картинки",
+                "Введите текст пост-сообщения или нажмите «Без текста».",
+                admin_broadcast_skip_text_keyboard(),
+            )
             return
         if st.state == "broadcast_edit_image":
             bid = int(st.data.get("broadcast_id", 0))
@@ -2483,8 +2751,17 @@ async def _handle_admin_callback(
 
     if cb_payload == "admin:broadcast_skip_text":
         st = fsm.get_state(user_id)
-        if not st or st.state not in ("broadcast_w_text", "broadcast_edit_text"):
+        if not st or st.state not in ("broadcast_w_text", "broadcast_edit_text", "offer_post_w_text"):
             await _ack()
+            return
+        if st.state == "offer_post_w_text":
+            fsm.set_state(user_id, "offer_post_w_button_text", st.data | {"text": ""})
+            await _edit_then_ask(
+                "Без текста",
+                f"Введите текст на кнопке.\n\n"
+                f"По умолчанию: «{_OFFER_POST_DEFAULT_BUTTON_TEXT}» — или нажмите кнопку с этой надписью ниже.",
+                admin_broadcast_default_button_keyboard(_OFFER_POST_DEFAULT_BUTTON_TEXT),
+            )
             return
         if st.state == "broadcast_edit_text":
             bid = int(st.data.get("broadcast_id", 0))
@@ -2513,8 +2790,18 @@ async def _handle_admin_callback(
 
     if cb_payload == "admin:broadcast_default_btn":
         st = fsm.get_state(user_id)
-        if not st or st.state not in ("broadcast_w_button_text", "broadcast_edit_button_text"):
+        if not st or st.state not in ("broadcast_w_button_text", "broadcast_edit_button_text", "offer_post_w_button_text"):
             await _ack()
+            return
+        if st.state == "offer_post_w_button_text":
+            fsm.set_state(
+                user_id, "offer_post_w_button_url", st.data | {"button_text": _OFFER_POST_DEFAULT_BUTTON_TEXT}
+            )
+            await _edit_then_ask(
+                f"Текст кнопки: «{_OFFER_POST_DEFAULT_BUTTON_TEXT}»",
+                "Введите адрес, куда будет вести кнопка:",
+                admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+            )
             return
         next_state = "broadcast_w_button_url" if st.state == "broadcast_w_button_text" else "broadcast_edit_button_url"
         fsm.set_state(user_id, next_state, st.data | {"button_text": _BROADCAST_DEFAULT_BUTTON_TEXT})

@@ -227,6 +227,36 @@ class Repo:
             .order_by(models.Offer.created_date.desc())
         ))
 
+    def update_offer_post_fields(
+        self,
+        offer_id: int,
+        *,
+        post_enabled: bool | None = None,
+        post_text: str | None = None,
+        post_button_text: str | None = None,
+        post_button_url: str | None = None,
+        post_image_url: str | None = None,
+        clear_image: bool = False,
+    ) -> models.Offer | None:
+        offer = self.db.get(models.Offer, offer_id)
+        if not offer:
+            return None
+        if post_enabled is not None:
+            offer.post_enabled = bool(post_enabled)
+        if post_text is not None:
+            offer.post_text = post_text
+        if post_button_text is not None:
+            offer.post_button_text = post_button_text
+        if post_button_url is not None:
+            offer.post_button_url = post_button_url
+        if clear_image:
+            offer.post_image_url = None
+        elif post_image_url is not None:
+            offer.post_image_url = post_image_url
+        self.db.commit()
+        self.db.refresh(offer)
+        return offer
+
     def create_lead(
         self,
         user_id: int,
