@@ -10,6 +10,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _RATE_LIMIT_TIMEOUT = 300.0  # 5 минут
+_MIN_REQUEST_INTERVAL = 0.20  # микрофриз между запросами к MAX API
 
 
 def _token_from_max_upload_response(body: dict) -> str | None:
@@ -97,6 +98,8 @@ class MaxApiClient:
             headers={"Authorization": f"Bearer {bot_token}"},
             timeout=20.0,
         )
+        self._request_lock = asyncio.Lock()
+        self._last_request_ts = 0.0
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -111,6 +114,13 @@ class MaxApiClient:
         deadline = time.monotonic() + _RATE_LIMIT_TIMEOUT
         attempt = 0
         while True:
+            # Микрофриз: сглаживаем burst и снижаем риск 429.
+            async with self._request_lock:
+                now = time.monotonic()
+                elapsed = now - self._last_request_ts
+                if elapsed < _MIN_REQUEST_INTERVAL:
+                    await asyncio.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+                self._last_request_ts = time.monotonic()
             response = await self.client.request(method, path, **kwargs)
 
             if response.status_code == 429:
