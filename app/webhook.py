@@ -32,11 +32,13 @@ from app.keyboards.admin import (
     admin_input_nav_keyboard,
     admin_main_keyboard,
     admin_offer_select_platform_keyboard,
+    admin_offer_post_edit_text_keyboard,
     admin_offer_post_keyboard,
     admin_offer_view_keyboard,
     admin_offers_keyboard,
     admin_offers_root_keyboard,
     admin_scenario_image_menu_keyboard,
+    admin_scenario_edit_text_keyboard,
     admin_scenario_text_menu_keyboard,
     admin_platform_view_keyboard,
     admin_platforms_keyboard,
@@ -217,6 +219,35 @@ def _format_offer_post_preview(offer) -> str:
         f"Ссылка кнопки: {(offer.post_button_url or 'не задана')}",
     ]
     return "\n".join(lines)
+
+
+_OFFER_TEXT_PREVIEW_MAX = 3500
+
+
+def _format_offer_post_edit_text_prompt(offer) -> str:
+    raw = (offer.post_text or "").strip()
+    if not raw:
+        body = "— текст не задан —"
+    else:
+        body = raw if len(raw) <= _OFFER_TEXT_PREVIEW_MAX else raw[:_OFFER_TEXT_PREVIEW_MAX] + "\n…"
+    return (
+        "📝 Текст пост-сообщения\n\n"
+        f"Текущий текст:\n{body}\n\n"
+        "Отправьте новым сообщением текст, который нужно сохранить."
+    )
+
+
+def _format_scenario_edit_text_prompt(scenario) -> str:
+    raw = (scenario.description or "").strip()
+    if not raw:
+        body = "— текст не задан —"
+    else:
+        body = raw if len(raw) <= _OFFER_TEXT_PREVIEW_MAX else raw[:_OFFER_TEXT_PREVIEW_MAX] + "\n…"
+    return (
+        "📝 Текст для подписчика\n\n"
+        f"Текущий текст:\n{body}\n\n"
+        "Отправьте новым сообщением текст, который нужно сохранить."
+    )
 
 
 def _offer_post_keyboard_for(offer) -> list:
@@ -531,14 +562,6 @@ def _scenario_back_to_offer(
     else:
         from_nav = bool(from_offers_hint)
     return _offer_view_cb(scenario.offer_id, from_nav)
-
-
-def _fsm_clear_preserving_offer_nav(user_id: int, st: fsm.UserState | None) -> None:
-    """После правок сценария не терять флаг «пришли из списка офферов» — иначе ломается «Назад»."""
-    from_nav = bool(st and st.data and st.data.get("_scenario_return_from_offers"))
-    fsm.clear_state(user_id)
-    if from_nav:
-        fsm.set_state(user_id, "admin", {"_scenario_return_from_offers": True})
 
 
 async def _handle_user_callback(
@@ -907,7 +930,7 @@ async def _handle_admin_fsm_text(
 
         from_nav = bool(st.data.get("_scenario_return_from_offers"))
         repo.update_scenario_field(scenario_id, image_url=image_url)
-        _fsm_clear_preserving_offer_nav(user_id, st)
+        fsm.clear_state(user_id)
         scenario = repo.db.get(Scenario, scenario_id)
         sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
         bp = _scenario_back_to_offer(repo, user_id, scenario_id, from_nav)
@@ -924,25 +947,15 @@ async def _handle_admin_fsm_text(
             fsm.clear_state(user_id)
             return True
         if not text:
-            sk_txt = [
-                [
-                    {
-                        "type": "callback",
-                        "text": "⏭ Без текста",
-                        "payload": f"admin:scenario_skip_text:{scenario_id}",
-                    }
-                ]
-            ]
-            sk_txt.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
             await api.send_message_with_keyboard(
                 user_id,
-                "Введите текст сообщением или нажмите «Без текста».",
-                sk_txt,
+                "Введите текст сообщением или нажмите «Удалить текст».",
+                admin_scenario_edit_text_keyboard(scenario_id),
             )
             return True
         from_nav = bool(st.data.get("_scenario_return_from_offers"))
         repo.update_scenario_field(scenario_id, description=text)
-        _fsm_clear_preserving_offer_nav(user_id, st)
+        fsm.clear_state(user_id)
         scenario = repo.db.get(Scenario, scenario_id)
         sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
         bp = _scenario_back_to_offer(repo, user_id, scenario_id, from_nav)
@@ -1323,8 +1336,8 @@ async def _handle_admin_fsm_text(
         if not cleaned:
             await api.send_message_with_keyboard(
                 user_id,
-                "Текст не может быть пустым. Чтобы удалить текст, нажмите «Убрать текст» в карточке.",
-                admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+                "Текст не может быть пустым. Чтобы очистить текст, нажмите «Удалить текст».",
+                admin_offer_post_edit_text_keyboard(offer_id),
             )
             return True
         offer = repo.update_offer_post_fields(offer_id, post_text=cleaned)
@@ -1560,7 +1573,7 @@ async def _handle_admin_callback(
             sid = int(st.data.get("scenario_id", 0))
             fsm.clear_state(user_id)
             await _handle_admin_callback(
-                api, repo, user_id, f"admin:scenario_text_menu:{sid}", "", message_id
+                api, repo, user_id, f"admin:offer_scenario_view:{sid}", "", message_id
             )
             return
 
@@ -2029,6 +2042,7 @@ async def _handle_admin_callback(
         offer = repo.db.get(Offer, offer_id)
         if not offer:
             return
+        fsm.clear_state(user_id)
         await _edit(
             _format_offer_post_preview(offer),
             _offer_post_keyboard_for(offer),
@@ -2087,6 +2101,7 @@ async def _handle_admin_callback(
 
     if cb_payload.startswith("admin:offer_post_clear_text:"):
         offer_id = int(cb_payload.split(":")[-1])
+        fsm.clear_state(user_id)
         offer = repo.update_offer_post_fields(offer_id, post_text="")
         if not offer:
             return
@@ -2104,8 +2119,8 @@ async def _handle_admin_callback(
         fsm.set_state(user_id, "offer_post_edit_text", {"offer_id": offer_id})
         await _edit_then_ask(
             f"Пост-сообщение «{offer.name}»",
-            "Введите текст пост-сообщения.",
-            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+            _format_offer_post_edit_text_prompt(offer),
+            admin_offer_post_edit_text_keyboard(offer_id),
         )
         return
 
@@ -2183,10 +2198,11 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
-        offer_id = scenario.offer_id
         st_nav = fsm.get_state(user_id)
         from_nav = bool(st_nav and st_nav.data and st_nav.data.get("_scenario_return_from_offers"))
+        fsm.clear_state(user_id)
+        sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
+        offer_id = scenario.offer_id
         back_ov = _offer_view_cb(offer_id, from_nav)
         await _edit(
             f"Сценарий оффера:",
@@ -2200,7 +2216,6 @@ async def _handle_admin_callback(
         scenario_id = int(cb_payload.split(":")[-1])
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
-            await _ack()
             return
         has_img = bool((scenario.image_url or "").strip())
         caption = "📷 Картинка для подписчика."
@@ -2208,10 +2223,12 @@ async def _handle_admin_callback(
         if not has_img:
             await _edit(caption + "\n\nСейчас картинка не задана.", kbd)
             return
-        await _edit(
-            caption + "\n\nСейчас картинка задана. Замените или уберите её кнопками ниже.",
-            kbd,
-        )
+        token = await api.resolve_broadcast_image_token(scenario.image_url)
+        if token:
+            await api.answer_callback(callback_id)
+            await api.send_message_with_image_and_keyboard(user_id, caption, token, kbd)
+            return
+        await _edit(caption + "\n\nНе удалось загрузить превью.", kbd)
         return
 
     if cb_payload.startswith("admin:scenario_replace_image:"):
@@ -2220,15 +2237,11 @@ async def _handle_admin_callback(
         if not scenario:
             return
         msg_text = "📷 Отправьте изображение сообщением ниже."
-        st_prev = fsm.get_state(user_id)
-        img_data: dict = {
+        fsm.set_state(user_id, "scenario_edit_image", {
             "scenario_id": scenario_id,
             "_msg_id": message_id,
             "_msg_text": msg_text,
-        }
-        if st_prev and st_prev.data.get("_scenario_return_from_offers"):
-            img_data["_scenario_return_from_offers"] = True
-        fsm.set_state(user_id, "scenario_edit_image", img_data)
+        })
         rows = [[{"type": "callback", "text": "⏭ Без картинки", "payload": f"admin:scenario_skip_image:{scenario_id}"}]]
         rows.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
         await _edit(msg_text, rows)
@@ -2238,7 +2251,7 @@ async def _handle_admin_callback(
         scenario_id = int(cb_payload.split(":")[-1])
         st_nav = fsm.get_state(user_id)
         from_nav = bool(st_nav and st_nav.data and st_nav.data.get("_scenario_return_from_offers"))
-        _fsm_clear_preserving_offer_nav(user_id, st_nav)
+        fsm.clear_state(user_id)
         repo.update_scenario_field(scenario_id, image_url=None)
         scenario = repo.db.get(Scenario, scenario_id)
         sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
@@ -2266,26 +2279,27 @@ async def _handle_admin_callback(
         scenario = repo.db.get(Scenario, scenario_id)
         if not scenario:
             return
-        msg_text = "📝 Введите текст акции, который увидит подписчик."
-        st_prev = fsm.get_state(user_id)
-        txt_data: dict = {
-            "scenario_id": scenario_id,
-            "_msg_id": message_id,
-            "_msg_text": msg_text,
-        }
-        if st_prev and st_prev.data.get("_scenario_return_from_offers"):
-            txt_data["_scenario_return_from_offers"] = True
-        fsm.set_state(user_id, "scenario_edit_text", txt_data)
-        rows = [[{"type": "callback", "text": "⏭ Без текста", "payload": f"admin:scenario_skip_text:{scenario_id}"}]]
-        rows.extend(admin_input_nav_keyboard("admin:wizard_back", "admin:main"))
-        await _edit(msg_text, rows)
+        msg_text = _format_scenario_edit_text_prompt(scenario)
+        prev = fsm.get_state(user_id)
+        prev_from = bool(prev and prev.data and prev.data.get("_scenario_return_from_offers"))
+        fsm.set_state(
+            user_id,
+            "scenario_edit_text",
+            {
+                "scenario_id": scenario_id,
+                "_msg_id": message_id,
+                "_msg_text": msg_text,
+                "_scenario_return_from_offers": prev_from,
+            },
+        )
+        await _edit(msg_text, admin_scenario_edit_text_keyboard(scenario_id))
         return
 
     if cb_payload.startswith("admin:scenario_skip_text:"):
         scenario_id = int(cb_payload.split(":")[-1])
         st_nav = fsm.get_state(user_id)
         from_nav = bool(st_nav and st_nav.data and st_nav.data.get("_scenario_return_from_offers"))
-        _fsm_clear_preserving_offer_nav(user_id, st_nav)
+        fsm.clear_state(user_id)
         repo.update_scenario_field(scenario_id, description=None)
         scenario = repo.db.get(Scenario, scenario_id)
         sub_n = repo.count_subscription_channels_for_scenario(scenario_id)
@@ -2609,7 +2623,6 @@ async def _handle_admin_callback(
         try:
             bid = int(cb_payload.rsplit(":", 1)[-1])
         except ValueError:
-            await _ack()
             return
         b = repo.get_broadcast(bid)
         if not b:
@@ -2729,7 +2742,7 @@ async def _handle_admin_callback(
         if repo.cancel_pending_broadcast(bid):
             _remove_broadcast_scheduler_job(bid)
             await _edit(
-                f"Рассылка #{bid} отменена.",
+                f"Рассылка #{bid} удалена.",
                 admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)),
             )
         else:

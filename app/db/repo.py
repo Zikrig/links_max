@@ -311,12 +311,17 @@ class Repo:
         return list(self.db.scalars(stmt))
 
     def count_broadcasts(self) -> int:
-        n = self.db.scalar(select(func.count()).select_from(models.Broadcast))
+        n = self.db.scalar(
+            select(func.count())
+            .select_from(models.Broadcast)
+            .where(models.Broadcast.status != "cancelled")
+        )
         return int(n or 0)
 
     def list_broadcasts_paged(self, offset: int, limit: int) -> list[models.Broadcast]:
         stmt = (
             select(models.Broadcast)
+            .where(models.Broadcast.status != "cancelled")
             .order_by(models.Broadcast.id.desc())
             .offset(offset)
             .limit(limit)

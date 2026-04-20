@@ -203,12 +203,16 @@ def admin_offer_post_keyboard(
         [[_btn("🗑 Убрать картинку", f"admin:offer_post_clear_image:{offer_id}")]]
         if has_image
         else []
-    ) + (
-        [[_btn("🗑 Убрать текст", f"admin:offer_post_clear_text:{offer_id}")]]
-        if has_text
-        else []
     ) + [
         [_btn("🔙 Назад", f"admin:offer_view:{offer_id}")],
+    ]
+
+
+def admin_offer_post_edit_text_keyboard(offer_id: int) -> list:
+    """Редактирование текста поста: удалить или вернуться к настройкам поста."""
+    return [
+        [_btn("🗑 Удалить текст", f"admin:offer_post_clear_text:{offer_id}")],
+        [_btn("🔙 Назад", f"admin:offer_post:{offer_id}")],
     ]
 
 
@@ -254,6 +258,14 @@ def admin_scenario_image_menu_keyboard(scenario_id: int, has_image: bool) -> lis
 def admin_scenario_text_menu_keyboard(scenario_id: int) -> list:
     return [
         [_btn("🔄 Заменить текст", f"admin:scenario_replace_text:{scenario_id}")],
+        [_btn("🔙 Назад", f"admin:offer_scenario_view:{scenario_id}")],
+    ]
+
+
+def admin_scenario_edit_text_keyboard(scenario_id: int) -> list:
+    """Редактирование текста сценария: удалить или назад к сценарию."""
+    return [
+        [_btn("🗑 Удалить текст", f"admin:scenario_skip_text:{scenario_id}")],
         [_btn("🔙 Назад", f"admin:offer_scenario_view:{scenario_id}")],
     ]
 
