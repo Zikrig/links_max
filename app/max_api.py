@@ -10,7 +10,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _RATE_LIMIT_TIMEOUT = 300.0  # 5 минут
-_MIN_REQUEST_INTERVAL = 1.0  # микрофриз между запросами к MAX API
+_MIN_REQUEST_INTERVAL = 5.0  # микрофриз между запросами к MAX API
 
 
 def _token_from_max_upload_response(body: dict) -> str | None:
