@@ -203,6 +203,10 @@ def admin_offer_post_keyboard(
         [[_btn("🗑 Убрать картинку", f"admin:offer_post_clear_image:{offer_id}")]]
         if has_image
         else []
+    ) + (
+        [[_btn("🗑 Убрать текст", f"admin:offer_post_clear_text:{offer_id}")]]
+        if has_text
+        else []
     ) + [
         [_btn("🔙 Назад", f"admin:offer_view:{offer_id}")],
     ]
@@ -229,7 +233,7 @@ def admin_scenario_settings_keyboard(
 
     return [
         [_btn(f"{img_icon} Картинка", f"admin:scenario_image_menu:{scenario.id}")],
-        [_btn(f"{txt_icon} Текст для подписчика", f"admin:scenario_text_menu:{scenario.id}")],
+        [_btn(f"{txt_icon} Текст для подписчика", f"admin:scenario_replace_text:{scenario.id}")],
         [_btn(f"{sub_icon} Проверка подписки: {sub_label}", f"admin:scenario_toggle_sub:{scenario.id}")],
         [_btn(f"{ch_icon} Каналы ({ch_count})", f"admin:scenario_channels:{scenario.id}")],
         [_btn("🗑 Удалить сценарий", f"admin:scenario_delete:{scenario.id}")],
@@ -351,20 +355,14 @@ BROADCAST_MANAGE_PAGE_SIZE = 5
 
 
 def admin_broadcast_manage_keyboard(page: int, total_count: int, items: list) -> list:
-    """Список рассылок с пагинацией. Неотправленные — отмена в строке; отправленные — быстрый повтор."""
+    """Список рассылок с пагинацией: в строке только переход в карточку."""
     rows: list = []
     for b in items:
         title = (getattr(b, "title", None) or "без названия").replace("\n", " ").strip()
         if len(title) > 30:
             title = title[:27] + "…"
         main = _btn(f"#{b.id} «{title}»", f"admin:broadcast_view:{b.id}")
-        st = getattr(b, "status", "") or ""
-        if st == "scheduled":
-            rows.append([main, _btn("🚫", f"admin:broadcast_cancel_pending:{b.id}")])
-        elif st in ("sent", "failed"):
-            rows.append([main, _btn("📋", f"admin:broadcast_repeat:{b.id}")])
-        else:
-            rows.append([main])
+        rows.append([main])
     if total_count == 0:
         rows.append([_btn("🔙 Назад", "admin:broadcast")])
         return rows
@@ -387,7 +385,7 @@ def admin_broadcast_manage_cancel_keyboard() -> list:
 
 
 def admin_broadcast_detail_keyboard(broadcast_id: int, status: str) -> list:
-    """Карточка рассылки: для scheduled доступны отправка, перенос и отмена."""
+    """Карточка рассылки: для scheduled доступны отправка, перенос и удаление."""
     rows: list = []
     if status == "scheduled":
         rows.append([_btn("▶ Отправить сейчас", f"admin:broadcast_now:{broadcast_id}")])
@@ -395,7 +393,7 @@ def admin_broadcast_detail_keyboard(broadcast_id: int, status: str) -> list:
         rows.append([_btn("📝 Изменить текст", f"admin:broadcast_edit_text:{broadcast_id}")])
         rows.append([_btn("🔗 Изменить кнопку/ссылку", f"admin:broadcast_edit_button:{broadcast_id}")])
         rows.append([_btn("📅 Изменить время", f"admin:broadcast_reschedule:{broadcast_id}")])
-        rows.append([_btn("🚫 Отменить", f"admin:broadcast_cancel_pending:{broadcast_id}")])
+        rows.append([_btn("🗑 Удалить", f"admin:broadcast_cancel_pending:{broadcast_id}")])
     elif status in ("sent", "failed"):
         rows.append([_btn("📋 Повторить (копия)", f"admin:broadcast_repeat:{broadcast_id}")])
     rows.append([_btn("🔙 К списку", "admin:broadcast_manage:0")])

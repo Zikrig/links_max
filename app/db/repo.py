@@ -375,7 +375,7 @@ class Repo:
         b = self.db.get(models.Broadcast, broadcast_id)
         if not b or b.status != "scheduled":
             return False
-        b.status = "cancelled"
+        self.db.delete(b)
         self.db.commit()
         return True
 
