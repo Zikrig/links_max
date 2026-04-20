@@ -229,7 +229,7 @@ def admin_scenario_settings_keyboard(
 
     return [
         [_btn(f"{img_icon} Картинка", f"admin:scenario_image_menu:{scenario.id}")],
-        [_btn(f"{txt_icon} Текст для подписчика", f"admin:scenario_replace_text:{scenario.id}")],
+        [_btn(f"{txt_icon} Текст для подписчика", f"admin:scenario_text_menu:{scenario.id}")],
         [_btn(f"{sub_icon} Проверка подписки: {sub_label}", f"admin:scenario_toggle_sub:{scenario.id}")],
         [_btn(f"{ch_icon} Каналы ({ch_count})", f"admin:scenario_channels:{scenario.id}")],
         [_btn("🗑 Удалить сценарий", f"admin:scenario_delete:{scenario.id}")],
