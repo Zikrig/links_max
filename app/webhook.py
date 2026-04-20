@@ -76,6 +76,8 @@ _seen_callbacks: dict[str, float] = {}
 _CALLBACK_TTL = 60.0  # секунд
 _seen_message_created: dict[str, float] = {}
 _MESSAGE_CREATED_TTL = 120.0  # секунд
+_seen_message_created_fallback: dict[str, float] = {}
+_MESSAGE_CREATED_FALLBACK_TTL = 20.0  # секунд
 
 def _is_duplicate_callback(callback_id: str) -> bool:
     """Вернуть True если этот callback_id уже обрабатывался недавно."""
@@ -99,6 +101,26 @@ def _is_duplicate_message_created(message_id: str) -> bool:
     if message_id in _seen_message_created:
         return True
     _seen_message_created[message_id] = now
+    return False
+
+
+def _is_duplicate_message_created_fallback(user_id: int, text: str, attachments: list | None) -> bool:
+    """
+    Fallback-дедуп для событий без message_id.
+    Ключ — user_id + текст + набор типов вложений.
+    """
+    now = time.monotonic()
+    expired = [
+        k for k, v in _seen_message_created_fallback.items()
+        if now - v > _MESSAGE_CREATED_FALLBACK_TTL
+    ]
+    for k in expired:
+        del _seen_message_created_fallback[k]
+    att_sig = ",".join(sorted((a.get("type") or "") for a in (attachments or []) if isinstance(a, dict)))
+    key = f"{user_id}|{(text or '').strip()}|{att_sig}"
+    if key in _seen_message_created_fallback:
+        return True
+    _seen_message_created_fallback[key] = now
     return False
 
 
@@ -290,11 +312,12 @@ def _extract_event(payload: dict) -> Event:
         sender = msg.get("sender", {}) or {}
         body = msg.get("body", {}) or {}
         attachments = body.get("attachments", []) or []
+        mid = str(body.get("mid", "") or msg.get("mid", "") or payload.get("message_id", "") or "")
         return Event(
             user_id=int(sender.get("user_id") or 0),
             text=str(body.get("text", "")).strip(),
             update_type=update_type,
-            message_id=str(body.get("mid", "") or ""),
+            message_id=mid,
             max_name=str(sender.get("name", "") or ""),
             max_username=str(sender.get("username", "") or ""),
             attachments=attachments,
@@ -2889,6 +2912,10 @@ async def handle_max_webhook(
         if ev.update_type == "message_created" and ev.message_id:
             if _is_duplicate_message_created(ev.message_id):
                 logger.info("Duplicate message_created mid=%s — skip", ev.message_id[:20])
+                return Response(status_code=200)
+        elif ev.update_type == "message_created":
+            if _is_duplicate_message_created_fallback(ev.user_id, ev.text, ev.attachments):
+                logger.info("Duplicate message_created fallback user_id=%s text=%r — skip", ev.user_id, ev.text[:80])
                 return Response(status_code=200)
 
         # FSM: подписчик
