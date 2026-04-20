@@ -315,6 +315,32 @@ class Repo:
         self.db.commit()
         return True
 
+    def update_pending_broadcast_fields(
+        self,
+        broadcast_id: int,
+        *,
+        text: str | None = None,
+        button_text: str | None = None,
+        button_url: str | None = None,
+        image_url: str | None = None,
+        clear_image: bool = False,
+    ) -> bool:
+        b = self.db.get(models.Broadcast, broadcast_id)
+        if not b or b.status != "scheduled":
+            return False
+        if text is not None:
+            b.text = text
+        if button_text is not None:
+            b.button_text = button_text
+        if button_url is not None:
+            b.button_url = button_url
+        if clear_image:
+            b.image_url = None
+        elif image_url is not None:
+            b.image_url = image_url
+        self.db.commit()
+        return True
+
     def cancel_pending_broadcast(self, broadcast_id: int) -> bool:
         b = self.db.get(models.Broadcast, broadcast_id)
         if not b or b.status != "scheduled":

@@ -1076,6 +1076,111 @@ async def _handle_admin_fsm_text(
         )
         return True
 
+    if state == "broadcast_edit_image":
+        bid = int(st.data.get("broadcast_id", 0))
+        image_ref = _extract_broadcast_image_ref(attachments)
+        if not image_ref:
+            await api.send_message_with_keyboard(
+                user_id,
+                "Нужна картинка файлом или «Без картинки».",
+                admin_broadcast_skip_image_keyboard(),
+            )
+            return True
+        token_ready = await api.resolve_broadcast_image_token(image_ref)
+        if not token_ready:
+            await api.send_message_with_keyboard(
+                user_id,
+                "Не удалось сохранить изображение. Отправьте файл ещё раз или «Без картинки».",
+                admin_broadcast_skip_image_keyboard(),
+            )
+            return True
+        if not repo.update_pending_broadcast_fields(bid, image_url=token_ready):
+            fsm.clear_state(user_id)
+            await api.send_message(user_id, "Рассылка недоступна для редактирования.")
+            return True
+        fsm.clear_state(user_id)
+        b = repo.get_broadcast(bid)
+        if not b:
+            await api.send_message(user_id, "Рассылка не найдена.")
+            return True
+        await api.send_message_with_keyboard(
+            user_id,
+            f"✅ Картинка обновлена.\n\n{_format_broadcast_detail(b)}",
+            admin_broadcast_detail_keyboard(b.id, b.status),
+        )
+        return True
+
+    if state == "broadcast_edit_text":
+        bid = int(st.data.get("broadcast_id", 0))
+        if not repo.update_pending_broadcast_fields(bid, text=text.strip()):
+            fsm.clear_state(user_id)
+            await api.send_message(user_id, "Рассылка недоступна для редактирования.")
+            return True
+        fsm.clear_state(user_id)
+        b = repo.get_broadcast(bid)
+        if not b:
+            await api.send_message(user_id, "Рассылка не найдена.")
+            return True
+        await api.send_message_with_keyboard(
+            user_id,
+            f"✅ Текст обновлён.\n\n{_format_broadcast_detail(b)}",
+            admin_broadcast_detail_keyboard(b.id, b.status),
+        )
+        return True
+
+    if state == "broadcast_edit_button_text":
+        if not text.strip():
+            await api.send_message_with_keyboard(
+                user_id,
+                f"Введите текст кнопки или нажмите «{_BROADCAST_DEFAULT_BUTTON_TEXT}» ниже.\n"
+                f"Значение по умолчанию: «{_BROADCAST_DEFAULT_BUTTON_TEXT}».",
+                admin_broadcast_default_button_keyboard(_BROADCAST_DEFAULT_BUTTON_TEXT),
+            )
+            return True
+        bid = int(st.data.get("broadcast_id", 0))
+        fsm.set_state(
+            user_id,
+            "broadcast_edit_button_url",
+            {"broadcast_id": bid, "button_text": text.strip()},
+        )
+        await api.send_message_with_keyboard(
+            user_id,
+            "Введите адрес, куда будет вести кнопка:",
+            admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+        )
+        return True
+
+    if state == "broadcast_edit_button_url":
+        if not text.strip():
+            await api.send_message_with_keyboard(
+                user_id,
+                "Адрес не может быть пустым.",
+                admin_input_nav_keyboard("admin:wizard_back", "admin:main"),
+            )
+            return True
+        bid = int(st.data.get("broadcast_id", 0))
+        button_text = st.data.get("button_text") or _BROADCAST_DEFAULT_BUTTON_TEXT
+        url = _normalize_broadcast_https_url(text)
+        if not repo.update_pending_broadcast_fields(
+            bid,
+            button_text=button_text,
+            button_url=url,
+        ):
+            fsm.clear_state(user_id)
+            await api.send_message(user_id, "Рассылка недоступна для редактирования.")
+            return True
+        fsm.clear_state(user_id)
+        b = repo.get_broadcast(bid)
+        if not b:
+            await api.send_message(user_id, "Рассылка не найдена.")
+            return True
+        await api.send_message_with_keyboard(
+            user_id,
+            "✅ Кнопка и ссылка обновлены.\n\n" + _format_broadcast_detail(b),
+            admin_broadcast_detail_keyboard(b.id, b.status),
+        )
+        return True
+
     if state == "broadcast_preview":
         await api.send_message(
             user_id,
@@ -1357,6 +1462,20 @@ async def _handle_admin_callback(
                 await _handle_admin_callback(api, repo, user_id, bp, "", message_id)
             else:
                 await _handle_admin_callback(api, repo, user_id, "admin:broadcast", "", message_id)
+            return
+
+        if st.state in (
+            "broadcast_edit_image",
+            "broadcast_edit_text",
+            "broadcast_edit_button_text",
+            "broadcast_edit_button_url",
+        ):
+            bid = int(st.data.get("broadcast_id", 0))
+            fsm.clear_state(user_id)
+            if bid:
+                await _handle_admin_callback(api, repo, user_id, f"admin:broadcast_view:{bid}", "", message_id)
+            else:
+                await _handle_admin_callback(api, repo, user_id, "admin:broadcast_manage:0", "", message_id)
             return
 
         if st.state == "moderator_add_uid":
@@ -2231,6 +2350,59 @@ async def _handle_admin_callback(
         )
         return
 
+    if cb_payload.startswith("admin:broadcast_edit_image:"):
+        try:
+            bid = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            await _ack()
+            return
+        b = repo.get_broadcast(bid)
+        if not b or b.status != "scheduled":
+            await _edit("Редактирование недоступно.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)))
+            return
+        fsm.set_state(user_id, "broadcast_edit_image", {"broadcast_id": bid})
+        await _edit(
+            f"Рассылка #{bid}: пришлите новую картинку или нажмите «Без картинки».",
+            admin_broadcast_skip_image_keyboard(),
+        )
+        return
+
+    if cb_payload.startswith("admin:broadcast_edit_text:"):
+        try:
+            bid = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            await _ack()
+            return
+        b = repo.get_broadcast(bid)
+        if not b or b.status != "scheduled":
+            await _edit("Редактирование недоступно.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)))
+            return
+        fsm.set_state(user_id, "broadcast_edit_text", {"broadcast_id": bid})
+        await _edit_then_ask(
+            f"Редактирование рассылки #{bid}",
+            "Введите новый текст уведомления или нажмите «Без текста».",
+            admin_broadcast_skip_text_keyboard(),
+        )
+        return
+
+    if cb_payload.startswith("admin:broadcast_edit_button:"):
+        try:
+            bid = int(cb_payload.rsplit(":", 1)[-1])
+        except ValueError:
+            await _ack()
+            return
+        b = repo.get_broadcast(bid)
+        if not b or b.status != "scheduled":
+            await _edit("Редактирование недоступно.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)))
+            return
+        fsm.set_state(user_id, "broadcast_edit_button_text", {"broadcast_id": bid})
+        await _edit_then_ask(
+            f"Редактирование кнопки в рассылке #{bid}",
+            f"Введите новый текст кнопки.\n\nПо умолчанию: «{_BROADCAST_DEFAULT_BUTTON_TEXT}».",
+            admin_broadcast_default_button_keyboard(_BROADCAST_DEFAULT_BUTTON_TEXT),
+        )
+        return
+
     if cb_payload.startswith("admin:broadcast_cancel_pending:"):
         try:
             bid = int(cb_payload.rsplit(":", 1)[-1])
@@ -2282,8 +2454,24 @@ async def _handle_admin_callback(
 
     if cb_payload == "admin:broadcast_skip_image":
         st = fsm.get_state(user_id)
-        if not st or st.state != "broadcast_w_image":
+        if not st or st.state not in ("broadcast_w_image", "broadcast_edit_image"):
             await _ack()
+            return
+        if st.state == "broadcast_edit_image":
+            bid = int(st.data.get("broadcast_id", 0))
+            if not repo.update_pending_broadcast_fields(bid, clear_image=True):
+                fsm.clear_state(user_id)
+                await _edit("Редактирование недоступно.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)))
+                return
+            fsm.clear_state(user_id)
+            b = repo.get_broadcast(bid)
+            if not b:
+                await _edit("Рассылка не найдена.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), []))
+                return
+            await _edit(
+                f"✅ Картинка удалена.\n\n{_format_broadcast_detail(b)}",
+                admin_broadcast_detail_keyboard(b.id, b.status),
+            )
             return
         fsm.set_state(user_id, "broadcast_w_text", st.data | {"image_url": None})
         await _edit_then_ask(
@@ -2295,8 +2483,24 @@ async def _handle_admin_callback(
 
     if cb_payload == "admin:broadcast_skip_text":
         st = fsm.get_state(user_id)
-        if not st or st.state != "broadcast_w_text":
+        if not st or st.state not in ("broadcast_w_text", "broadcast_edit_text"):
             await _ack()
+            return
+        if st.state == "broadcast_edit_text":
+            bid = int(st.data.get("broadcast_id", 0))
+            if not repo.update_pending_broadcast_fields(bid, text=""):
+                fsm.clear_state(user_id)
+                await _edit("Редактирование недоступно.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), repo.list_broadcasts_paged(0, BROADCAST_MANAGE_PAGE_SIZE)))
+                return
+            fsm.clear_state(user_id)
+            b = repo.get_broadcast(bid)
+            if not b:
+                await _edit("Рассылка не найдена.", admin_broadcast_manage_keyboard(0, repo.count_broadcasts(), []))
+                return
+            await _edit(
+                f"✅ Текст очищен.\n\n{_format_broadcast_detail(b)}",
+                admin_broadcast_detail_keyboard(b.id, b.status),
+            )
             return
         fsm.set_state(user_id, "broadcast_w_button_text", st.data | {"text": ""})
         await _edit_then_ask(
@@ -2309,12 +2513,11 @@ async def _handle_admin_callback(
 
     if cb_payload == "admin:broadcast_default_btn":
         st = fsm.get_state(user_id)
-        if not st or st.state != "broadcast_w_button_text":
+        if not st or st.state not in ("broadcast_w_button_text", "broadcast_edit_button_text"):
             await _ack()
             return
-        fsm.set_state(
-            user_id, "broadcast_w_button_url", st.data | {"button_text": _BROADCAST_DEFAULT_BUTTON_TEXT}
-        )
+        next_state = "broadcast_w_button_url" if st.state == "broadcast_w_button_text" else "broadcast_edit_button_url"
+        fsm.set_state(user_id, next_state, st.data | {"button_text": _BROADCAST_DEFAULT_BUTTON_TEXT})
         await _edit_then_ask(
             f"Текст кнопки: «{_BROADCAST_DEFAULT_BUTTON_TEXT}»",
             "Введите адрес, куда будет вести кнопка:",

@@ -197,7 +197,7 @@ def admin_scenario_settings_keyboard(
 
     return [
         [_btn(f"{img_icon} Картинка", f"admin:scenario_image_menu:{scenario.id}")],
-        [_btn(f"{txt_icon} Текст для подписчика", f"admin:scenario_text_menu:{scenario.id}")],
+        [_btn(f"{txt_icon} Текст для подписчика", f"admin:scenario_replace_text:{scenario.id}")],
         [_btn(f"{sub_icon} Проверка подписки: {sub_label}", f"admin:scenario_toggle_sub:{scenario.id}")],
         [_btn(f"{ch_icon} Каналы ({ch_count})", f"admin:scenario_channels:{scenario.id}")],
         [_btn("🗑 Удалить сценарий", f"admin:scenario_delete:{scenario.id}")],
@@ -355,11 +355,15 @@ def admin_broadcast_manage_cancel_keyboard() -> list:
 
 
 def admin_broadcast_detail_keyboard(broadcast_id: int, status: str) -> list:
-    """Карточка рассылки: отмена только в списке (для scheduled). Копия после «Повторить» — без отмены здесь."""
+    """Карточка рассылки: для scheduled доступны отправка, перенос и отмена."""
     rows: list = []
     if status == "scheduled":
         rows.append([_btn("▶ Отправить сейчас", f"admin:broadcast_now:{broadcast_id}")])
-        rows.append([_btn("📅 Другое время", f"admin:broadcast_reschedule:{broadcast_id}")])
+        rows.append([_btn("🖼 Изменить картинку", f"admin:broadcast_edit_image:{broadcast_id}")])
+        rows.append([_btn("📝 Изменить текст", f"admin:broadcast_edit_text:{broadcast_id}")])
+        rows.append([_btn("🔗 Изменить кнопку/ссылку", f"admin:broadcast_edit_button:{broadcast_id}")])
+        rows.append([_btn("📅 Изменить время", f"admin:broadcast_reschedule:{broadcast_id}")])
+        rows.append([_btn("🚫 Отменить", f"admin:broadcast_cancel_pending:{broadcast_id}")])
     elif status in ("sent", "failed"):
         rows.append([_btn("📋 Повторить (копия)", f"admin:broadcast_repeat:{broadcast_id}")])
     rows.append([_btn("🔙 К списку", "admin:broadcast_manage:0")])
