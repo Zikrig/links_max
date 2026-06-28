@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     )
     personal_data_policy_url: str
     bot_username: str = ""
+    api_base: str = Field(
+        default="https://platform-api2.max.ru",
+        validation_alias=AliasChoices("API_BASE", "MAX_API_URL", "MAX_API_BASE"),
+    )
 
     @field_validator("admin_user_ids", mode="before")
     @classmethod

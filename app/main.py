@@ -168,7 +168,7 @@ async def lifespan(_: FastAPI):
 
     Base.metadata.create_all(bind=engine)
     _run_migrations()
-    max_api = MaxApiClient(settings.bot_token)
+    max_api = MaxApiClient(settings.bot_token, settings.api_base)
     subscribed = False
     webhook_url = ""
     if not settings.bot_username:

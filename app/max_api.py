@@ -94,11 +94,11 @@ class MaxApiClient:
     _global_request_lock = asyncio.Lock()
     _global_last_request_ts = 0.0
 
-    def __init__(self, bot_token: str):
+    def __init__(self, bot_token: str, api_base: str = "https://platform-api2.max.ru"):
         self._bot_token = bot_token
         self._auth_mode = "bearer"
         self.client = httpx.AsyncClient(
-            base_url="https://botapi.max.ru",
+            base_url=api_base.strip().rstrip("/"),
             headers={"Authorization": f"Bearer {bot_token}"},
             timeout=20.0,
         )

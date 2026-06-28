@@ -5,6 +5,11 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    dns:
+      - 8.8.8.8
+      - 77.88.8.8
+    environment:
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
     volumes:
       - ./data:/data
     ports:

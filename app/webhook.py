@@ -804,7 +804,7 @@ async def _handle_admin_fsm_text(
             return True
         link = text.strip()
         settings_ch = _get_cached_settings()
-        api_ch = MaxApiClient(settings_ch.bot_token)
+        api_ch = MaxApiClient(settings_ch.bot_token, settings_ch.api_base)
         try:
             ok, chat_id, title_or_err = await api_ch.resolve_chat_from_invite_url(link)
             if not ok or chat_id is None:
@@ -3004,7 +3004,7 @@ async def handle_max_webhook(
     ev = _extract_event(payload)
     logger.info("Webhook update_type=%r user_id=%r text=%r", ev.update_type, ev.user_id, ev.text)
 
-    api = MaxApiClient(settings.bot_token)
+    api = MaxApiClient(settings.bot_token, settings.api_base)
     try:
         if not ev.user_id:
             return Response(status_code=200)

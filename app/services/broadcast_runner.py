@@ -81,7 +81,7 @@ def launch_broadcast_now(broadcast_id: int) -> None:
 
 async def run_broadcast(broadcast_id: int) -> None:
     settings = get_settings()
-    api = MaxApiClient(settings.bot_token)
+    api = MaxApiClient(settings.bot_token, settings.api_base)
     try:
         db = SessionLocal()
         try:
